@@ -258,7 +258,7 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
       <div id="intro_models"></div>
       <p class="hint" style="margin:10px 2px 0" data-t="other_gguf"></p>
       <div class="foot"><span class="steps">2 / 4</span>
-        <span><button class="btn" data-skip data-t="later"></button> <button class="btn main" data-next data-t="next"></button></span></div>
+        <span><button class="btn" data-back data-t="prev"></button> <button class="btn" data-skip data-t="later"></button> <button class="btn main" data-next data-t="next"></button></span></div>
     </div>
     <div class="step" data-step="2">
       <h1 id="lic_head"></h1>
@@ -279,7 +279,7 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
       <div class="bar" id="intro_bar"><i></i></div>
       <p id="intro_status" style="margin:6px 2px 0"></p>
       <div class="foot"><span class="steps">3 / 4</span>
-        <span><button class="btn" id="lic_back" data-t="other_model"></button> <button class="btn main" id="intro_download"></button></span></div>
+        <span><button class="btn" data-back data-t="prev"></button> <button class="btn main" id="intro_download"></button></span></div>
     </div>
     <div class="step" data-step="3">
       <h1 data-t="how"></h1>
@@ -290,7 +290,8 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
         <kbd id="how2"></kbd><span data-t="how_clear"></span>
       </div>
       <p data-t="how_bar"></p>
-      <div class="foot"><span class="steps">4 / 4</span><button class="btn main" id="intro_done" data-t="start"></button></div>
+      <div class="foot"><span class="steps">4 / 4</span>
+        <span><button class="btn" data-back data-t="prev"></button> <button class="btn main" id="intro_done" data-t="start"></button></span></div>
     </div>
   </div>
 </div>
@@ -336,7 +337,7 @@ const TEXT = {
     lic_publish: '翻訳結果を公表するときは、PLaMo の生成物だと明示してください。',
     lic_decide: '法律、医療、金融、人物評価などの重要な判断で、翻訳結果を唯一の根拠にしないでください。',
     lic_age: '18 歳未満の方は、保護者の同意が必要です。',
-    lic_read: 'ライセンスの全文を読む', lic_check: 'ライセンスの全文を読み、同意します', lic_decline: '同意しない', lic_title_plain: 'ライセンス', other_model: '別のモデルを選ぶ',
+    lic_read: 'ライセンスの全文を読む', lic_check: 'ライセンスの全文を読み、同意します', lic_decline: '同意しない', lic_title_plain: 'ライセンス', prev: '戻る',
     lic_plamo: 'PLaMo コミュニティライセンス', lic_apache: 'Apache License 2.0', lic_other: 'ライセンス',
     lic_need: '使うには同意が必要です。会社で使うには PFN への登録などが必要です', lic_done: '同意済みです。会社で使うには PFN への登録などが必要です',
     lic_free: '同意の手続きは要りません。会社でも使えます', lic_unknown: 'ファイルの配布元のライセンスに従ってください',
@@ -378,7 +379,7 @@ const TEXT = {
     lic_publish: 'If you publish translations, state that PLaMo generated them.',
     lic_decide: 'Do not rely on translations as the only basis for legal, medical, financial or personnel decisions.',
     lic_age: 'If you are under 18, you need a parent or guardian\'s consent.',
-    lic_read: 'Read the full license', lic_check: 'I have read the full license and accept it', lic_decline: 'Decline', lic_title_plain: 'License', other_model: 'Choose another model',
+    lic_read: 'Read the full license', lic_check: 'I have read the full license and accept it', lic_decline: 'Decline', lic_title_plain: 'License', prev: 'Back',
     lic_plamo: 'PLaMo Community License', lic_apache: 'Apache License 2.0', lic_other: 'License',
     lic_need: 'Using it needs your agreement. Business use needs registering with PFN, among other things', lic_done: 'Accepted. Business use needs registering with PFN, among other things',
     lic_free: 'No agreement needed. It can be used at work', lic_unknown: 'Follow the license of where the file came from',
@@ -396,7 +397,7 @@ const licenseHint = (s, m) => T(m.license === 'plamo' ? (s.license_accepted ? 'l
 const GPU_LIMITS = [null, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192];
 const $ = id => document.getElementById(id);
 const post = m => chrome.webview.postMessage(m);
-let state = null, page = 'translate', waiting = -1, step = 0, introOpen = false, pending = null;
+let state = null, page = 'translate', waiting = -1, step = 0, introOpen = false, pending = null, trail = [];
 const T = key => TEXT[state?.ui_lang === 'en' ? 'en' : 'ja'][key] ?? key;
 
 function options(select, list, value) {
@@ -632,11 +633,20 @@ addEventListener('mousedown', e => {
   post({ cmd: 'hotkey', index, mods: (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 4 : 0), key });
 }, true);
 for (const b of document.querySelectorAll('[data-lang]')) b.onclick = () => send('ui_lang', b.dataset.lang);
-function go(n) { step = n; renderIntro(state, state.models.find(x => x.file === state.model) ?? {}, state.progress >= 0); }
+function go(n) {
+  if (n !== step) trail.push(step); // Back returns to where the user came from, even after a skip
+  step = n;
+  renderIntro(state, state.models.find(x => x.file === state.model) ?? {}, state.progress >= 0);
+}
+function back() {
+  const n = trail.pop() ?? Math.max(0, step - 1);
+  step = n;
+  renderIntro(state, state.models.find(x => x.file === state.model) ?? {}, state.progress >= 0);
+}
+for (const b of document.querySelectorAll('[data-back]')) b.onclick = back;
 for (const b of document.querySelectorAll('[data-next]')) b.onclick = () => go(step + 1);
 for (const b of document.querySelectorAll('[data-skip]')) b.onclick = () => go(3);
 $('lic_agree').onchange = () => go(step);
-$('lic_back').onclick = () => go(1);
 $('intro_download').onclick = () => {
   const m = state.models.find(x => x.file === state.model) ?? {};
   if (needsLicense(state, m)) send('license_accept'); // the button only works with the box ticked
