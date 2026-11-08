@@ -575,6 +575,7 @@ struct Ui {
     main: Cell<HWND>,
     overlay: Cell<HWND>,
     frame: Cell<HWND>,
+    line: Cell<HWND>, // around a drag
     selecting: Cell<Option<Region>>, // the drag so far, in screen pixels
     peeking: Cell<bool>, // the original is on show while a key is held
     shift_seen: Cell<bool>, // Shift was down during the drag in progress
@@ -599,6 +600,7 @@ thread_local! {
         main: Cell::new(null_mut()),
         overlay: Cell::new(null_mut()),
         frame: Cell::new(null_mut()),
+        line: Cell::new(null_mut()),
         selecting: Cell::new(None),
         peeking: Cell::new(false),
         shift_seen: Cell::new(false),
@@ -660,9 +662,8 @@ pub fn update_frame() {
         let frame = ui.frame.get();
         let config = config::get();
         let flashing = ui.flashing.get();
-        let selecting = ui.selecting.get();
-        let wanted = selecting.is_some() || ui.job_id.get() != 0 && !PAUSED.load(Ordering::Relaxed) && (config.show_frame || flashing);
-        let region = selecting.unwrap_or(ui.region.get());
+        let wanted = ui.job_id.get() != 0 && !PAUSED.load(Ordering::Relaxed) && (config.show_frame || flashing);
+        let region = ui.region.get();
         if !wanted || region.w <= 0 || region.h <= 0 {
             ShowWindow(frame, SW_HIDE);
             return;
@@ -672,8 +673,36 @@ pub fn update_frame() {
         let r = frame_rect(region, outer, on_its_monitor(&outer));
         SetWindowPos(frame, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         InvalidateRect(frame, null(), 0);
-        UpdateWindow(frame); // a drag resizes it on every move
+        UpdateWindow(frame);
     });
+}
+
+/// The green line around a drag. The window covers every screen and only its shape follows the
+/// drag: a window that grew on every move would show its new inside black until painted.
+unsafe fn place_line(line: HWND, selecting: Option<Region>) {
+    unsafe {
+        let Some(region) = selecting else {
+            ShowWindow(line, SW_HIDE);
+            return;
+        };
+        let (mut dpi, mut unused) = (96, 96);
+        let centre = POINT { x: region.x + region.w / 2, y: region.y + region.h / 2 };
+        GetDpiForMonitor(MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
+        let t = FRAME_PX * dpi as i32 / 96;
+        let outer = RECT { left: region.x - t, top: region.y - t, right: region.x + region.w + t, bottom: region.y + region.h + t };
+        let r = frame_rect(region, outer, on_its_monitor(&outer));
+        let (vx, vy) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+        let ring = CreateRectRgn(r.left - vx, r.top - vy, r.right - vx, r.bottom - vy);
+        let inside = CreateRectRgn(r.left - vx + t, r.top - vy + t, r.right - vx - t, r.bottom - vy - t);
+        CombineRgn(ring, ring, inside, RGN_DIFF);
+        DeleteObject(inside);
+        SetWindowRgn(line, ring, 1); // the window owns the region from here; the class brush paints it
+        if IsWindowVisible(line) == 0 {
+            let (vw, vh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            SetWindowPos(line, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        UpdateWindow(line);
+    }
 }
 
 /// `visible` is the part of `outer` its monitor shows. A maximised window has no outside, so the
@@ -695,8 +724,7 @@ unsafe fn paint_frame(hwnd: HWND) {
         fill(hdc, &r, KEY_COLOR);
         let mut corner: RECT = std::mem::zeroed();
         GetWindowRect(hwnd, &mut corner);
-        let selecting = UI.with(|ui| ui.selecting.get().is_some());
-        let parts = if selecting { Vec::new() } else { PARTS.lock().unwrap().clone() };
+        let parts = PARTS.lock().unwrap().clone();
         let around = |p: &Part| {
             let p = p.region;
             RECT { left: p.x - t - corner.left, top: p.y - t - corner.top, right: p.x + p.w + t - corner.left, bottom: p.y + p.h + t - corner.top }
@@ -879,11 +907,22 @@ unsafe fn update_hover(select: HWND) {
         let new = visible.map(|r| (r.left - origin.x, r.top - origin.y, r.right - origin.x, r.bottom - origin.y));
         let old = ui.hover.replace(new);
         if old != new {
-            for (left, top, right, bottom) in [old, new].into_iter().flatten() {
-                InvalidateRect(select, &RECT { left, top, right, bottom }, 0);
+            for edge in [old, new].into_iter().flatten().flat_map(hover_edges) {
+                InvalidateRect(select, &edge, 0);
             }
         }
     });
+}
+
+/// The white frame around the window a click would select.
+fn hover_edges((left, top, right, bottom): (i32, i32, i32, i32)) -> [RECT; 4] {
+    let t = HOVER_FRAME;
+    [
+        RECT { left, top, right, bottom: top + t },
+        RECT { left, top: bottom - t, right, bottom },
+        RECT { left, top, right: left + t, bottom },
+        RECT { left: right - t, top, right, bottom },
+    ]
 }
 
 unsafe fn end_select() {
@@ -896,7 +935,7 @@ unsafe fn end_select() {
             bar::hide();
         }
         ui.selecting.set(None);
-        update_frame();
+        place_line(ui.line.get(), None);
     });
 }
 
@@ -1007,21 +1046,20 @@ unsafe extern "system" fn select_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(hwnd, &mut ps);
-                FillRect(hdc, &ps.rcPaint, GetStockObject(BLACK_BRUSH));
                 let (from, to, hover) = UI.with(|ui| (ui.drag_from.get(), ui.drag_to.get(), ui.hover.get()));
                 let dragged = from.map(|from| selection_rect(from, to)).filter(|rect| !is_small(rect));
-                match (dragged, hover) {
-                    (Some(rect), _) => fill(hdc, &rect, KEY_COLOR),
+                let (shapes, color) = match (dragged, hover) {
+                    (Some(rect), _) => (vec![rect], KEY_COLOR),
                     // A frame, not a clear area: clicks fall straight through the key colour.
-                    (None, Some((left, top, right, bottom))) => {
-                        let t = HOVER_FRAME;
-                        fill(hdc, &RECT { left, top, right, bottom: top + t }, HOVER_COLOR);
-                        fill(hdc, &RECT { left, top: bottom - t, right, bottom }, HOVER_COLOR);
-                        fill(hdc, &RECT { left, top, right: left + t, bottom }, HOVER_COLOR);
-                        fill(hdc, &RECT { left: right - t, top, right, bottom }, HOVER_COLOR);
-                    }
-                    (None, None) => {}
+                    (None, Some(hover)) => (hover_edges(hover).to_vec(), HOVER_COLOR),
+                    (None, None) => (Vec::new(), 0),
+                };
+                // Each pixel once: black under the clear area would be on screen for a moment.
+                for r in &shapes {
+                    fill(hdc, r, color);
+                    ExcludeClipRect(hdc, r.left, r.top, r.right, r.bottom);
                 }
+                FillRect(hdc, &ps.rcPaint, GetStockObject(BLACK_BRUSH));
                 EndPaint(hwnd, &ps);
                 0
             }
@@ -1038,25 +1076,39 @@ unsafe extern "system" fn select_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             WM_MOUSEMOVE => {
                 let at = lparam_xy(l);
                 let dragging = UI.with(|ui| {
-                    ui.drag_from.get().inspect(|&from| {
+                    ui.drag_from.get().map(|from| {
                         ui.shift_seen.set(ui.shift_seen.get() || shift_down());
-                        let old = selection_rect(from, ui.drag_to.replace(at));
-                        if let Some((left, top, right, bottom)) = ui.hover.get().filter(|_| !is_small(&selection_rect(from, at))) {
-                            InvalidateRect(hwnd, &RECT { left, top, right, bottom }, 0);
+                        let before = ui.drag_to.replace(at);
+                        if before == at {
+                            return false; // the line moving under the cursor sends one of these too
                         }
-                        InvalidateRect(hwnd, &old, 0);
-                        InvalidateRect(hwnd, &selection_rect(from, at), 0);
+                        // Only what changed: the strips the clear area gained or lost, and the hover
+                        // frame as it gives way to the drag or comes back.
+                        let shown = |r: RECT| (!is_small(&r)).then_some(r);
+                        let old = shown(selection_rect(from, before));
                         let rect = selection_rect(from, at);
+                        let new = shown(rect);
+                        if old.is_some() != new.is_some() {
+                            for edge in ui.hover.get().into_iter().flat_map(hover_edges) {
+                                InvalidateRect(hwnd, &edge, 0);
+                            }
+                        }
+                        let area = |r: Option<RECT>| r.map_or_else(|| CreateRectRgn(0, 0, 0, 0), |r| CreateRectRgnIndirect(&r));
+                        let (changed, now) = (area(old), area(new));
+                        CombineRgn(changed, changed, now, RGN_XOR);
+                        InvalidateRgn(hwnd, changed, 0);
+                        DeleteObject(changed);
+                        DeleteObject(now);
                         let mut origin = POINT { x: 0, y: 0 };
                         ClientToScreen(hwnd, &mut origin);
                         ui.selecting.set((!is_small(&rect)).then(|| Region { x: rect.left + origin.x, y: rect.top + origin.y, w: rect.right - rect.left, h: rect.bottom - rect.top }));
+                        true
                     })
                 });
-                if dragging.is_some() {
-                    update_frame();
-                }
-                if dragging.is_none() {
-                    update_hover(hwnd);
+                match dragging {
+                    Some(true) => UI.with(|ui| place_line(ui.line.get(), ui.selecting.get())),
+                    Some(false) => {}
+                    None => update_hover(hwnd),
                 }
                 0
             }
@@ -1655,6 +1707,7 @@ fn main() {
         register_class(w!("SonobaSelect"), Some(select_proc), IDC_CROSS);
         register_class(w!("SonobaOverlay"), Some(overlay_proc), IDC_ARROW);
         register_class(w!("SonobaFrame"), Some(frame_proc), IDC_ARROW);
+        register_class(w!("SonobaLine"), Some(DefWindowProcW), IDC_ARROW);
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
 
         let module = GetModuleHandleW(null());
@@ -1689,10 +1742,27 @@ fn main() {
         );
         SetLayeredWindowAttributes(frame, KEY_COLOR, 255, LWA_COLORKEY);
         SetWindowDisplayAffinity(frame, WDA_EXCLUDEFROMCAPTURE); // it can sit on the region's edge
+        let line = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            w!("SonobaLine"),
+            null(),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            null_mut(),
+            null_mut(),
+            module,
+            null(),
+        );
+        SetClassLongPtrW(line, GCLP_HBRBACKGROUND, CreateSolidBrush(FRAME_COLOR) as isize);
+        SetWindowDisplayAffinity(line, WDA_EXCLUDEFROMCAPTURE);
         UI.with(|ui| {
             ui.main.set(main);
             ui.overlay.set(overlay);
             ui.frame.set(frame);
+            ui.line.set(line);
         });
         look_changed();
 
