@@ -26,11 +26,13 @@ const fn known(file: &'static str, repo: &'static str, family: &'static str, siz
     Known { file, repo, family, size, tier, gb, memory_gb, license }
 }
 
-const CATALOG: [Known; 5] = [
+const CATALOG: [Known; 6] = [
     known("plamo-3-translate-0.8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-0.8b-GGUF", "plamo", "0.8B", "light", 0.6, Some(0.65), "plamo"),
     known("plamo-3-translate-2b-Q4_K_M.gguf", "pfnet/plamo-3-translate-2b-GGUF", "plamo", "2B", "standard", 1.8, Some(2.1), "plamo"),
     known("plamo-3-translate-8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-8b-GGUF", "plamo", "8B", "high", 5.3, None, "plamo"),
     known("plamo-3-translate-31b-Q4_K_M.gguf", "pfnet/plamo-3-translate-31b-GGUF", "plamo", "31B", "best", 19.5, None, "plamo"),
+    // Tencent's own smaller files need kernels llama.cpp does not have yet; unsloth's 3-bit one is the smallest that stays sound.
+    known("Hy-MT2-1.8B-UD-IQ3_XXS.gguf", "unsloth/Hy-MT2-1.8B-GGUF", "hymt", "1.8B", "light", 0.8, Some(1.4), "apache"),
     known("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "hymt", "1.8B", "standard", 1.1, Some(1.7), "apache"),
 ];
 const SOURCE: &str = "https://huggingface.co";
@@ -228,7 +230,7 @@ mod tests {
 
     #[test]
     fn the_catalog_covers_every_size_and_the_default() {
-        assert_eq!(list().iter().take(5).filter(|e| can_download(&e.file) && e.family.is_some()).count(), 5);
+        assert_eq!(list().iter().take(6).filter(|e| can_download(&e.file) && e.family.is_some()).count(), 6);
         assert!(CATALOG.iter().filter(|k| k.family == "plamo").any(|k| k.file == DEFAULT && k.tier == "standard"));
         assert!(can_download(DEFAULT) && can_download("Hy-MT2-1.8B-Q4_K_M.gguf"));
         assert!(!can_download("gemma-4-q4.gguf"));

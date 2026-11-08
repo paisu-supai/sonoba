@@ -91,7 +91,8 @@ RAM の上限はありません。RAM の使用量はモデルの大きさと GP
 | PLaMo 3 Translate 2B | 1.8GB | 標準 |
 | PLaMo 3 Translate 8B | 5.3GB | 高品質 |
 | PLaMo 3 Translate 31B | 19.5GB | 最高品質 |
-| Hy-MT2 1.8B | 1.1GB | Tencent のモデル。Apache License 2.0 で、同意なしで会社でも使える。速さは 2B と同じくらいで、GPU メモリは約 1.7GB。文体の指定は効かない |
+| Hy-MT2 1.8B 軽量 | 0.8GB | 標準を unsloth が 3bit に小さくしたもの（UD-IQ3_XXS）。使うメモリは約 1.4GB。訳の質は標準より少し下がる |
+| Hy-MT2 1.8B 標準 | 1.1GB | Tencent のモデル。Apache License 2.0 で、同意なしで会社でも使える。速さは 2B と同じくらいで、GPU メモリは約 1.7GB。文体の指定は効かない |
 
 ほかのモデルも使えます。GGUF ファイルを `data\models` に置くと、設定の一覧に出ます。ファイル名が `plamo-3-translate` で始まらないモデルには、モデル自身のチャットテンプレートで翻訳を依頼します。`Hy-MT` で始まるモデルには、モデルの説明どおりの文で依頼します。
 
@@ -172,4 +173,4 @@ RENDER_IN=in.png RENDER_OUT=out.png cargo test render_picture -- --ignored --noc
 
 PLaMo 3 Translate は [PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja) で提供されていて、モデルはこのリポジトリにも配布物にも含みません。同意しないと、PLaMo 3 Translate のダウンロードも翻訳もできません。**会社で使うときは、[PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja)を読んでください。** 職場の PC で業務に使う場合も商業目的にあたり、ローカルで動くかどうかは関係ありません。直近の事業年度の売上（関係会社を含む）が 10 億円以下なら PFN の登録フォームの提出が必要で、10 億円を超えると別の契約が必要です。翻訳結果を公表するときは、PLaMo の生成物であることを明示してください。
 
-Hy-MT2 は Tencent が Apache License 2.0 で提供していて、モデルはこのリポジトリにも配布物にも含みません。同意の手続きは要らず、会社でも使えます。
+Hy-MT2 は Tencent が Apache License 2.0 で提供していて、モデルはこのリポジトリにも配布物にも含みません。同意の手続きは要らず、会社でも使えます。軽量は、unsloth が同じライセンスで公開している量子化版です。

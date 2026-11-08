@@ -10,7 +10,7 @@ The model is not included in this repository or in release packages. The app dow
 
 ## Hy-MT2
 
-The model is not included in this repository or in release packages. The app downloads it from Hugging Face ([tencent/Hy-MT2-1.8B-GGUF](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF)) when the user asks, under the [Apache License 2.0](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/main/LICENSE.txt).
+The model is not included in this repository or in release packages. The app downloads it from Hugging Face ([tencent/Hy-MT2-1.8B-GGUF](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF)) when the user asks, under the [Apache License 2.0](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/main/LICENSE.txt). The light size is unsloth's quantization of the same model ([unsloth/Hy-MT2-1.8B-GGUF](https://huggingface.co/unsloth/Hy-MT2-1.8B-GGUF)), also under the Apache License 2.0.
 
 ## PP-OCRv6
 

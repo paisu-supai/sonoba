@@ -93,7 +93,8 @@ When the target language is English, sentences containing only Latin characters 
 | PLaMo 3 Translate 2B | 1.8GB | Standard |
 | PLaMo 3 Translate 8B | 5.3GB | High quality |
 | PLaMo 3 Translate 31B | 19.5GB | Highest Quality |
-| Hy-MT2 1.8B | 1.1GB | Tencent's model. Apache License 2.0, so it needs no agreement and can be used at work. About as fast as 2B, about 1.7GB of GPU memory. The style setting does not apply. |
+| Hy-MT2 1.8B Light | 0.8GB | The standard one made smaller by unsloth, at 3 bits (UD-IQ3_XXS). About 1.4GB of memory. Translations are a little worse than the standard one. |
+| Hy-MT2 1.8B Standard | 1.1GB | Tencent's model. Apache License 2.0, so it needs no agreement and can be used at work. About as fast as 2B, about 1.7GB of GPU memory. The style setting does not apply. |
 
 Other models can also be used. Placing GGUF files in `data\models` will make them appear in the settings list. Models whose filenames do not start with `plamo-3-translate` are asked to translate through their own chat template. Models whose filenames start with `Hy-MT` are asked in the words of their model card.
 
@@ -174,4 +175,4 @@ The source code for this app is licensed under the MIT License. The licenses for
 
 PLaMo 3 Translate is provided under the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en), and the model is not included in this repository or the distribution. Until you agree to it, you cannot download PLaMo 3 Translate or translate with it. **When using this for business purposes, please read the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en).** Using it for work on a workplace PC also constitutes a commercial use, regardless of whether it runs locally. If your revenue for the most recent fiscal year (including affiliates) is 1 billion yen or less, you must submit the PFN registration form; if it exceeds 1 billion yen, a separate contract is required. When publishing translation results, please clearly indicate that they are PLaMo-generated.
 
-Hy-MT2 is provided by Tencent under the Apache License 2.0, and the model is not included in this repository or the distribution. It needs no agreement and can be used at work.
+Hy-MT2 is provided by Tencent under the Apache License 2.0, and the model is not included in this repository or the distribution. It needs no agreement and can be used at work. The light size is a quantization by unsloth, published under the same license.
