@@ -797,7 +797,8 @@ unsafe extern "system" fn on_location(_: HWINEVENTHOOK, _: u32, window: HWND, ob
 // --- Selection layer
 
 unsafe fn begin_select(live: bool) {
-    if !config::get().license_accepted {
+    let config = config::get();
+    if models::needs_license(&config.model) && !config.license_accepted {
         return settings::open(); // which asks
     }
     UI.with(|ui| unsafe {
@@ -1707,7 +1708,7 @@ fn main() {
             MessageBoxW(null_mut(), warning.as_ptr(), w!("Sonoba"), MB_OK | MB_ICONWARNING);
         }
         let config = config::get();
-        if !hotkeys_ok || !config.license_accepted || !models::is_present(&config.model) {
+        if !hotkeys_ok || (models::needs_license(&config.model) && !config.license_accepted) || !models::is_present(&config.model) {
             settings::open();
         }
 

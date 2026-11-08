@@ -1,4 +1,4 @@
-//! The models: PLaMo 3 Translate in its four sizes, plus any GGUF file dropped into the folder.
+//! The models: PLaMo 3 Translate in its four sizes and Hy-MT2, plus any GGUF file dropped into the folder.
 
 use crate::i18n::t;
 use serde_json::Value;
@@ -11,7 +11,14 @@ use std::time::Duration;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub const DEFAULT: &str = "plamo-3-translate-2b-Q4_K_M.gguf";
-const CATALOG: [(&str, &str); 4] = [("0.8b", "軽量、0.6GB"), ("2b", "標準、1.8GB"), ("8b", "高品質、5.3GB"), ("31b", "最高品質、19.5GB")];
+/// (file, Hugging Face repository, name, note, license)
+const CATALOG: [(&str, &str, &str, &str, &str); 5] = [
+    ("plamo-3-translate-0.8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-0.8b-GGUF", "PLaMo 3 Translate 0.8B", "軽量、0.6GB", "plamo"),
+    ("plamo-3-translate-2b-Q4_K_M.gguf", "pfnet/plamo-3-translate-2b-GGUF", "PLaMo 3 Translate 2B", "標準、1.8GB", "plamo"),
+    ("plamo-3-translate-8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-8b-GGUF", "PLaMo 3 Translate 8B", "高品質、5.3GB", "plamo"),
+    ("plamo-3-translate-31b-Q4_K_M.gguf", "pfnet/plamo-3-translate-31b-GGUF", "PLaMo 3 Translate 31B", "最高品質、19.5GB", "plamo"),
+    ("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "Hy-MT2 1.8B", "Apache 2.0、1.1GB", "apache"),
+];
 const SOURCE: &str = "https://huggingface.co";
 pub const KOREAN_OCR: &str = "korean_PP-OCRv5_mobile_rec.onnx"; // saved beside the models
 const KOREAN_REPO: &str = "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx";
@@ -28,11 +35,28 @@ pub static DOWNLOADING: Mutex<String> = Mutex::new(String::new()); // the file P
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Format {
     Plamo,
+    HyMt, // the template inside the GGUF file, with the request in the user turn as its model card shows
     Chat, // anything else: the template inside the GGUF file, plus a request to translate
 }
 
 pub fn format_of(file: &str) -> Format {
-    if file.starts_with("plamo-3-translate") { Format::Plamo } else { Format::Chat }
+    if file.starts_with("plamo-3-translate") {
+        Format::Plamo
+    } else if file.to_ascii_lowercase().starts_with("hy-mt") {
+        Format::HyMt
+    } else {
+        Format::Chat
+    }
+}
+
+/// The PLaMo Community License binds whoever uses a PLaMo model, and nobody else.
+pub fn needs_license(file: &str) -> bool {
+    format_of(file) == Format::Plamo
+}
+
+/// The license the settings page shows: PLaMo's for any PLaMo file, the catalog's for the rest.
+pub fn license_of(file: &str) -> Option<&'static str> {
+    if needs_license(file) { Some("plamo") } else { CATALOG.iter().find(|e| e.0 == file).map(|e| e.4) }
 }
 
 pub struct Entry {
@@ -40,15 +64,11 @@ pub struct Entry {
     pub label: String,
 }
 
-fn catalog_file(size: &str) -> String {
-    format!("plamo-3-translate-{size}-Q4_K_M.gguf")
-}
-
 /// The catalog, then whatever else the folder holds.
 pub fn list() -> Vec<Entry> {
     let mut entries: Vec<Entry> = CATALOG
         .iter()
-        .map(|(size, note)| Entry { file: catalog_file(size), label: format!("PLaMo 3 Translate {} ({})", size.to_uppercase(), t(note)) })
+        .map(|(file, _, name, note, _)| Entry { file: file.to_string(), label: format!("{name} ({})", t(note)) })
         .collect();
     if let Ok(folder) = std::fs::read_dir(dir()) {
         for file in folder.flatten().filter_map(|f| f.file_name().into_string().ok()) {
@@ -82,7 +102,7 @@ pub fn has_part(file: &str) -> bool {
 }
 
 pub fn can_download(file: &str) -> bool {
-    CATALOG.iter().any(|(size, _)| catalog_file(size) == file)
+    CATALOG.iter().any(|e| e.0 == file)
 }
 
 pub fn delete(file: &str) -> std::io::Result<()> {
@@ -123,8 +143,8 @@ fn download(file: &str) -> Result<(), String> {
     let (repo, remote) = if file == KOREAN_OCR {
         (KOREAN_REPO.to_string(), KOREAN_REMOTE)
     } else {
-        let size = CATALOG.iter().find(|(s, _)| catalog_file(s) == file).map(|(s, _)| *s).ok_or("このモデルはダウンロードできません")?;
-        (format!("pfnet/plamo-3-translate-{size}-GGUF"), file)
+        let repo = CATALOG.iter().find(|e| e.0 == file).map(|e| e.1).ok_or("このモデルはダウンロードできません")?;
+        (repo.to_string(), file)
     };
     let (total, hash) = expected(&repo, remote)?;
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
@@ -176,13 +196,22 @@ mod tests {
     fn the_file_name_decides_the_prompt_format() {
         assert_eq!(format_of(DEFAULT), Format::Plamo);
         assert_eq!(format_of("plamo-3-translate-8b-Q3_K_M.gguf"), Format::Plamo);
+        assert_eq!(format_of("Hy-MT2-1.8B-Q4_K_M.gguf"), Format::HyMt);
         assert_eq!(format_of("gemma-4-q4.gguf"), Format::Chat);
     }
 
     #[test]
+    fn only_plamo_needs_its_license() {
+        assert!(needs_license(DEFAULT) && needs_license("plamo-3-translate-8b-Q3_K_M.gguf"));
+        assert!(!needs_license("Hy-MT2-1.8B-Q4_K_M.gguf") && !needs_license("gemma-4-q4.gguf"));
+        assert_eq!(license_of("Hy-MT2-1.8B-Q4_K_M.gguf"), Some("apache"));
+        assert_eq!(license_of("gemma-4-q4.gguf"), None);
+    }
+
+    #[test]
     fn the_catalog_covers_every_size_and_the_default() {
-        assert_eq!(list().iter().take(4).filter(|e| can_download(&e.file)).count(), 4);
-        assert!(can_download(DEFAULT));
+        assert_eq!(list().iter().take(5).filter(|e| can_download(&e.file)).count(), 5);
+        assert!(can_download(DEFAULT) && can_download("Hy-MT2-1.8B-Q4_K_M.gguf"));
         assert!(!can_download("gemma-4-q4.gguf"));
     }
 }

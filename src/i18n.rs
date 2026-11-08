@@ -29,6 +29,7 @@ const ENGLISH: &[(&str, &str)] = &[
     ("削除できません: ", "Cannot delete: "),
     ("軽量、0.6GB", "light, 0.6 GB"),
     ("標準、1.8GB", "standard, 1.8 GB"),
+    ("Apache 2.0、1.1GB", "Apache 2.0, 1.1 GB"),
     ("高品質、5.3GB", "high quality, 5.3 GB"),
     ("最高品質、19.5GB", "best quality, 19.5 GB"),
     ("Sonoba の設定", "Sonoba settings"),

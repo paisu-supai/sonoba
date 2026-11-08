@@ -127,6 +127,8 @@ input[type=text]:focus-visible, input[type=search]:focus-visible { outline: 2px 
 .points li { margin-bottom: 5px; }
 .agree { display: flex; gap: 9px; align-items: center; padding: 11px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); cursor: pointer; }
 .agree input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
+#lic_agree_row { margin: 0 16px 12px; }
+[hidden] { display: none !important; }
 kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); white-space: nowrap; }
 </style>
 </head>
@@ -167,6 +169,8 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
     <h1 data-t="nav_model"></h1>
     <div class="card">
       <div class="row"><div><b data-t="model"></b></div><select id="models"></select></div>
+      <div class="row" id="lic_row"><div><b id="lic_name"></b><small id="lic_hint"></small></div><a id="lic_link" data-t="license_link"></a></div>
+      <label class="agree" id="lic_agree_row"><input type="checkbox" id="lic_agree_model"><span data-t="lic_check"></span></label>
       <div class="bar" id="bar"><i></i></div>
       <div class="status" id="status"></div>
       <div class="actions">
@@ -249,28 +253,33 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
       <div class="foot"><span class="steps">1 / 4</span><button class="btn main" data-next data-t="next"></button></div>
     </div>
     <div class="step" data-step="1">
-      <h1 data-t="lic_title"></h1>
-      <p data-t="lic_note"></p>
-      <ul class="points">
-        <li data-t="lic_personal"></li>
-        <li data-t="lic_business"></li>
-        <li data-t="lic_publish"></li>
-        <li data-t="lic_decide"></li>
-        <li data-t="lic_age"></li>
-      </ul>
-      <p><a id="lic_open" data-t="lic_read"></a></p>
-      <label class="agree"><input type="checkbox" id="lic_agree"><span data-t="lic_check"></span></label>
-      <div class="foot"><span class="steps">2 / 4</span>
-        <span><button class="btn" id="lic_no" data-t="lic_decline"></button> <button class="btn main" id="lic_yes" data-t="next" disabled></button></span></div>
-    </div>
-    <div class="step" data-step="2">
       <h1 data-t="pick_model"></h1>
       <p data-t="pick_model_note"></p>
       <div id="intro_models"></div>
+      <p class="hint" style="margin:10px 2px 0" data-t="other_gguf"></p>
+      <div class="foot"><span class="steps">2 / 4</span>
+        <span><button class="btn" data-skip data-t="later"></button> <button class="btn main" data-next data-t="next"></button></span></div>
+    </div>
+    <div class="step" data-step="2">
+      <h1 id="lic_head"></h1>
+      <div id="lic_plamo">
+        <p data-t="lic_note"></p>
+        <ul class="points">
+          <li data-t="lic_personal"></li>
+          <li data-t="lic_business"></li>
+          <li data-t="lic_publish"></li>
+          <li data-t="lic_decide"></li>
+          <li data-t="lic_age"></li>
+        </ul>
+        <p><a id="lic_open" data-t="lic_read"></a></p>
+        <label class="agree"><input type="checkbox" id="lic_agree"><span data-t="lic_check"></span></label>
+      </div>
+      <p id="lic_other"></p>
+      <p><a id="lic_open2" data-t="license_link"></a></p>
       <div class="bar" id="intro_bar"><i></i></div>
       <p id="intro_status" style="margin:6px 2px 0"></p>
       <div class="foot"><span class="steps">3 / 4</span>
-        <span><button class="btn" data-skip data-t="later"></button> <button class="btn main" id="intro_download"></button></span></div>
+        <span><button class="btn" id="lic_back" data-t="other_model"></button> <button class="btn main" id="intro_download"></button></span></div>
     </div>
     <div class="step" data-step="3">
       <h1 data-t="how"></h1>
@@ -304,13 +313,13 @@ const TEXT = {
     model: '翻訳モデル', download: 'ダウンロード', cancel: '中止', delete: '削除', load: '読み込む', unload: 'アンロード',
     st_verify: 'ダウンロードしたファイルを確認しています', st_down: 'ダウンロード中', st_part: '途中までダウンロードしてあります（続きから再開できます）',
     st_none: 'ダウンロードされていません', st_ready: '読み込み済み（すぐ翻訳できます）', st_loading: '読み込み中…', st_idle: '読み込まれていません（最初の翻訳のときに読み込みます）',
-    model_note: 'GGUF ファイルをモデルのフォルダに置くと一覧に出ます。',
+    model_note: 'ほかの GGUF モデルも使えます。置き場所は README に書いてあります。', other_gguf: 'ほかの GGUF モデルも使えます。置き場所は README に書いてあります。',
     key_once: '範囲を 1 回翻訳', key_live: 'リアルタイム翻訳', key_clear: '訳文を消す', key_wait: 'キーを押してください…',
     key_note: 'Ctrl か Alt を含むキー、またはマウスの中ボタンとサイドボタンを押します。Esc で取り消せます。', key_bad: 'Ctrl か Alt を含めてください',
     key_reset: 'リセット', key_disable: '無効', keys_reset: 'すべて既定に戻す', key_none: '無効',
     key_taken: '別のアプリが使っています。別のキーにしてください', key_peek: '押している間だけ原文を見る', key_peek_note: '離すと訳文に戻ります', key_copy: '訳文をコピー',
     mouse_mid: 'マウス中ボタン', mouse_back: 'マウス戻るボタン', mouse_next: 'マウス進むボタン',
-    form: '文体', form_note: '翻訳先が日本語のときに使います', form_auto: 'おまかせ（原文に合わせる）', form_polite: 'です・ます調', form_plain: 'だ・である調',
+    form: '文体', form_note: '翻訳先が日本語で、モデルが PLaMo のときに使います', form_auto: 'おまかせ（原文に合わせる）', form_polite: 'です・ます調', form_plain: 'だ・である調',
     glossary: '用語集', glossary_note: '決まった訳にしたい言葉を登録します。原文にその言葉があるときだけ使います', term_add: '追加', term_from: '原文の言葉', term_to: '訳語',
     font: '訳文のフォント', font_default: '標準（Yu Gothic UI）', bold_text: '訳文を太字にする', bold_note: 'オフのときは元の文字に合わせます', opacity: '訳文の濃さ', opacity_note: '下げると元の画面が透けて見えます',
     nav_history: '履歴', keep_history: '履歴を残す', keep_note: 'アプリを終了すると消えます。ファイルには保存しません', clear: 'すべて消す', find: '履歴を検索', history_empty: 'まだ履歴はありません', history_note: 'クリックすると訳文をコピーします。', copied: 'コピーしました',
@@ -320,14 +329,18 @@ const TEXT = {
     autostart: 'Windows の起動時に開始する', autostart_note: 'アプリのフォルダを移動したら入れ直してください', ui_lang: '表示の言語',
     license_note: 'PLaMo コミュニティライセンスで提供されています', license_link: 'ライセンスを読む', folder: '設定とモデルの保存先',
     hello: 'ようこそ', hello_note: '画面の文字を、その場で訳文に置き換えます。翻訳はこの PC の中で完結します。表示の言語を選んでください。',
-    next: '次へ', pick_model: '翻訳モデルを選ぶ', pick_model_note: 'あとから変えられます。迷ったら 2B を選んでください。', later: 'あとで',
+    next: '次へ', pick_model: '翻訳モデルを選ぶ', pick_model_note: 'あとから変えられます。迷ったら PLaMo 3 Translate 2B を選んでください。', later: 'あとで',
     lic_title: 'ライセンスへの同意', lic_note: '翻訳モデルの PLaMo 3 Translate は、Preferred Networks（PFN）の PLaMo コミュニティライセンスで提供されています。使うにはこのライセンスへの同意が必要です。主な内容は次のとおりです。',
     lic_personal: '個人の学習や趣味、学術用途は、登録なしで無料です。',
     lic_business: '会社の業務など組織内の利用は商業目的にあたります。事前に PFN への登録が必要で、直近の事業年度の売上が関係会社を含めて 10 億円を超えると別の契約が必要です。',
     lic_publish: '翻訳結果を公表するときは、PLaMo の生成物だと明示してください。',
     lic_decide: '法律、医療、金融、人物評価などの重要な判断で、翻訳結果を唯一の根拠にしないでください。',
     lic_age: '18 歳未満の方は、保護者の同意が必要です。',
-    lic_read: 'ライセンスの全文を読む', lic_check: 'ライセンスの全文を読み、同意します', lic_decline: '同意しない',
+    lic_read: 'ライセンスの全文を読む', lic_check: 'ライセンスの全文を読み、同意します', lic_decline: '同意しない', lic_title_plain: 'ライセンス', other_model: '別のモデルを選ぶ',
+    lic_plamo: 'PLaMo コミュニティライセンス', lic_apache: 'Apache License 2.0', lic_other: 'ライセンス',
+    lic_need: '使うには同意が必要です。会社で使うには PFN への登録などが必要です', lic_done: '同意済みです。会社で使うには PFN への登録などが必要です',
+    lic_free: '同意の手続きは要りません。会社でも使えます', lic_unknown: 'ファイルの配布元のライセンスに従ってください',
+    apache_note: 'Hy-MT2 は Tencent が Apache License 2.0 で提供しています。同意の手続きは要らず、会社でも使えます。',
     how: '使い方', how_note: 'キーを押して、翻訳したい範囲をドラッグします。クリックするとウィンドウ全体を選びます。',
     how_once: '範囲を 1 回翻訳', how_live: '画面が変わるたびに翻訳', how_clear: '訳文を消す', how_bar: '範囲を選ぶときに画面の上にバーが出て、言語とリアルタイムを切り替えられます。', start: 'はじめる',
     back: 'やめる', ask_delete: 'モデルの削除', del_again: 'もう一度使うには、ダウンロードし直す必要があります。', del_gone: 'このファイルはごみ箱に入らず、元に戻せません。', del_yes: '削除する', ask_delete_q: 'を削除しますか？'
@@ -342,13 +355,13 @@ const TEXT = {
     model: 'Translation model', download: 'Download', cancel: 'Cancel', delete: 'Delete', load: 'Load', unload: 'Unload',
     st_verify: 'Checking the downloaded file', st_down: 'Downloading', st_part: 'Partly downloaded (it can resume)',
     st_none: 'Not downloaded', st_ready: 'Loaded and ready', st_loading: 'Loading…', st_idle: 'Not loaded (loads with the first translation)',
-    model_note: 'GGUF files placed in the model folder appear in this list.',
+    model_note: 'Other GGUF models work too. The README says where to put them.', other_gguf: 'Other GGUF models work too. The README says where to put them.',
     key_once: 'Translate a region once', key_live: 'Live translation', key_clear: 'Clear the translation', key_wait: 'Press the keys…',
     key_note: 'Press a combination with Ctrl or Alt, or the middle or a side mouse button. Esc cancels.', key_bad: 'Include Ctrl or Alt',
     key_reset: 'Reset', key_disable: 'Disable', keys_reset: 'Reset all to defaults', key_none: 'Disabled',
     key_taken: 'Another app holds this key. Choose another', key_peek: 'Show the original while held', key_peek_note: 'The translation returns on release', key_copy: 'Copy the translation',
     mouse_mid: 'Middle mouse button', mouse_back: 'Mouse back button', mouse_next: 'Mouse forward button',
-    form: 'Style', form_note: 'For Japanese output', form_auto: 'Automatic (follows the original)', form_polite: 'Polite (desu/masu)', form_plain: 'Plain (da/dearu)',
+    form: 'Style', form_note: 'For Japanese output with a PLaMo model', form_auto: 'Automatic (follows the original)', form_polite: 'Polite (desu/masu)', form_plain: 'Plain (da/dearu)',
     glossary: 'Glossary', glossary_note: 'Words that must get a fixed translation. Used only when the original contains them', term_add: 'Add', term_from: 'Word in the original', term_to: 'Translation',
     font: 'Translation font', font_default: 'Default (Yu Gothic UI)', bold_text: 'Always bold', bold_note: 'Off follows the original text', opacity: 'Strength', opacity_note: 'Lower lets the screen show through',
     nav_history: 'History', keep_history: 'Keep a history', keep_note: 'Gone when the app exits. Nothing is saved to a file', clear: 'Clear all', find: 'Search the history', history_empty: 'Nothing here yet', history_note: 'Click an entry to copy its translation.', copied: 'Copied',
@@ -358,20 +371,28 @@ const TEXT = {
     autostart: 'Start with Windows', autostart_note: 'Turn this on again after moving the app folder', ui_lang: 'Language',
     license_note: 'Provided under the PLaMo Community License', license_link: 'Read the license', folder: 'Settings and models are stored in',
     hello: 'Welcome', hello_note: 'Replaces the text on your screen with its translation, right where it is. Translation stays on this PC. Choose your language.',
-    next: 'Next', pick_model: 'Choose a translation model', pick_model_note: 'You can change it later. If unsure, take 2B.', later: 'Later',
+    next: 'Next', pick_model: 'Choose a translation model', pick_model_note: 'You can change it later. If unsure, take PLaMo 3 Translate 2B.', later: 'Later',
     lic_title: 'License agreement', lic_note: 'The translation model, PLaMo 3 Translate, is provided by Preferred Networks (PFN) under the PLaMo Community License. Using it requires accepting that license. In short:',
     lic_personal: 'Personal learning, hobbies and academic use are free, with no registration.',
     lic_business: 'Use within an organization, such as at work, counts as commercial. It requires registering with PFN first, and a separate agreement if the last fiscal year\'s revenue, affiliates included, exceeds 1 billion yen.',
     lic_publish: 'If you publish translations, state that PLaMo generated them.',
     lic_decide: 'Do not rely on translations as the only basis for legal, medical, financial or personnel decisions.',
     lic_age: 'If you are under 18, you need a parent or guardian\'s consent.',
-    lic_read: 'Read the full license', lic_check: 'I have read the full license and accept it', lic_decline: 'Decline',
+    lic_read: 'Read the full license', lic_check: 'I have read the full license and accept it', lic_decline: 'Decline', lic_title_plain: 'License', other_model: 'Choose another model',
+    lic_plamo: 'PLaMo Community License', lic_apache: 'Apache License 2.0', lic_other: 'License',
+    lic_need: 'Using it needs your agreement. Business use needs registering with PFN, among other things', lic_done: 'Accepted. Business use needs registering with PFN, among other things',
+    lic_free: 'No agreement needed. It can be used at work', lic_unknown: 'Follow the license of where the file came from',
+    apache_note: 'Hy-MT2 is provided by Tencent under the Apache License 2.0. No agreement is needed, and it can be used at work.',
     how: 'How to use it', how_note: 'Press the keys, then drag over the area to translate. A click selects a whole window.',
     how_once: 'Translate a region once', how_live: 'Translate whenever the screen changes', how_clear: 'Clear the translation', how_bar: 'A bar at the top of the screen, shown while selecting, switches languages and live mode.', start: 'Get started',
     back: 'Cancel', ask_delete: 'Delete model', del_again: 'To use it again you will need to download it again.', del_gone: 'This file skips the Recycle Bin and cannot be restored.', del_yes: 'Delete', ask_delete_q: ': delete this file?'
   }
 };
 const LICENSE = { ja: 'https://plamo.preferredai.jp/info/plamo-community-license-ja', en: 'https://plamo.preferredai.jp/info/plamo-community-license-en' };
+const APACHE = 'https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/main/LICENSE.txt';
+const needsLicense = (s, m) => m.license === 'plamo' && !s.license_accepted;
+const licenseUrl = (s, m) => m.license === 'plamo' ? LICENSE[s.ui_lang] ?? LICENSE.ja : m.license === 'apache' ? APACHE : '';
+const licenseHint = (s, m) => T(m.license === 'plamo' ? (s.license_accepted ? 'lic_done' : 'lic_need') : m.license === 'apache' ? 'lic_free' : 'lic_unknown');
 const GPU_LIMITS = [null, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192];
 const $ = id => document.getElementById(id);
 const post = m => chrome.webview.postMessage(m);
@@ -461,7 +482,11 @@ function render(s) {
   $('korean_download').disabled = (downloading && !packDown) || s.progress === 100;
   $('korean_delete').hidden = !(s.korean.present || s.korean.partial) || packDown;
   $('download').textContent = T(downloading ? 'cancel' : 'download');
-  $('download').disabled = packDown || !((downloading && s.progress !== 100) || (!downloading && !m.present && m.download));
+  $('download').disabled = packDown || !((downloading && s.progress !== 100) || (!downloading && !m.present && m.download && !needsLicense(s, m)));
+  $('lic_name').textContent = T(m.license === 'plamo' ? 'lic_plamo' : m.license === 'apache' ? 'lic_apache' : 'lic_other');
+  $('lic_hint').textContent = licenseHint(s, m);
+  $('lic_link').hidden = !licenseUrl(s, m);
+  $('lic_agree_row').hidden = !needsLicense(s, m);
   $('delete').disabled = !((m.present || m.partial) && !downloading);
   $('load').disabled = !(m.present && !downloading && s.engine === 'unloaded');
   $('unload').disabled = s.engine === 'unloaded';
@@ -469,7 +494,10 @@ function render(s) {
   $('message').textContent = s.message;
   $('version').textContent = s.version;
   $('folder').textContent = s.folder;
-  if (!introOpen && s.intro) { introOpen = true; $('intro').classList.add('on'); }
+  if (!introOpen && s.intro) {
+    introOpen = true; $('intro').classList.add('on');
+    if (s.intro_done) step = 2; // opened only to ask for the PLaMo license
+  }
   renderIntro(s, m, downloading);
 }
 let terms = null, past = [];
@@ -530,11 +558,16 @@ function renderIntro(s, m, downloading) {
     }
   }
   for (const b of box.children) b.setAttribute('aria-pressed', b.dataset.file === s.model);
+  const needs = needsLicense(s, m);
+  $('lic_head').textContent = T(needs ? 'lic_title' : 'lic_title_plain');
+  $('lic_plamo').hidden = !needs;
+  $('lic_other').textContent = needs ? '' : m.license === 'apache' ? T('apache_note') : licenseHint(s, m);
+  $('lic_open2').hidden = needs || !licenseUrl(s, m);
   bar($('intro_bar'), s);
   $('intro_status').textContent = m.present || downloading ? statusOf(s) : '';
   const d = $('intro_download');
   d.textContent = m.present ? T('next') : downloading ? T('cancel') : T('download');
-  d.disabled = downloading && s.progress === 100;
+  d.disabled = (downloading && s.progress === 100) || (needs && !$('lic_agree').checked);
   for (const i of [0, 1, 2]) $('how' + i).textContent = hotkey(s.hotkeys[i]);
 }
 function send(cmd, value) { post({ cmd, value }); }
@@ -566,6 +599,8 @@ $('korean_delete').onclick = () => send('korean_delete');
 $('load').onclick = () => send('load');
 $('unload').onclick = () => send('unload');
 for (const a of [$('license'), $('lic_open'), $('work_license')]) a.onclick = () => send('open', LICENSE[state.ui_lang] ?? LICENSE.ja);
+for (const a of [$('lic_link'), $('lic_open2')]) a.onclick = () => send('open', licenseUrl(state, state.models.find(x => x.file === state.model) ?? {}));
+$('lic_agree_model').onchange = e => { if (e.target.checked) send('license_accept'); };
 function choosing(index) {
   if (waiting >= 0 !== index >= 0) send('capture', index >= 0);
   waiting = index;
@@ -600,15 +635,16 @@ for (const b of document.querySelectorAll('[data-lang]')) b.onclick = () => send
 function go(n) { step = n; renderIntro(state, state.models.find(x => x.file === state.model) ?? {}, state.progress >= 0); }
 for (const b of document.querySelectorAll('[data-next]')) b.onclick = () => go(step + 1);
 for (const b of document.querySelectorAll('[data-skip]')) b.onclick = () => go(3);
-$('lic_agree').onchange = e => { $('lic_yes').disabled = !e.target.checked; };
-$('lic_no').onclick = () => send('close');
-$('lic_yes').onclick = () => {
-  send('license_accept');
-  if (state.intro_done) { introOpen = false; $('intro').classList.remove('on'); } else go(2);
-};
+$('lic_agree').onchange = () => go(step);
+$('lic_back').onclick = () => go(1);
 $('intro_download').onclick = () => {
   const m = state.models.find(x => x.file === state.model) ?? {};
-  if (m.present) return go(3);
+  if (needsLicense(state, m)) send('license_accept'); // the button only works with the box ticked
+  if (m.present) {
+    if (!state.intro_done) return go(3);
+    introOpen = false; $('intro').classList.remove('on');
+    return;
+  }
   send(state.progress >= 0 ? 'cancel' : 'download');
 };
 $('intro_done').onclick = () => { introOpen = false; $('intro').classList.remove('on'); send('intro_done'); };

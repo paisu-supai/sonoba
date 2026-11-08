@@ -16,7 +16,7 @@ Built with PLaMo.
 
 ## Getting started
 
-The supported OS is Windows 11. No installation is required. The Visual C++ runtime is included in the zip file, so it works without installing it separately. Extract the zip file to your preferred folder and launch `sonoba.exe`. The first time you run it, a guide opens: select the display language, agree to the license, and choose a translation model. Translation is not available until you have agreed.
+The supported OS is Windows 11. No installation is required. The Visual C++ runtime is included in the zip file, so it works without installing it separately. Extract the zip file to your preferred folder and launch `sonoba.exe`. The first time you run it, a guide opens: select the display language and a translation model. If you choose PLaMo 3 Translate, the guide asks you to agree to the PLaMo Community License before the download, and PLaMo 3 Translate does not translate until you agree. Hy-MT2 needs no agreement.
 
 Settings and models are saved in the `data` folder next to the exe. Deleting the entire folder will also delete the app. To update, overwrite the folder with the contents of a new zip file. If you place the app in a location it cannot write to, such as Program Files, they are saved in the `Sonoba` folders in `%APPDATA%` and `%LOCALAPPDATA%`. If you are using auto-start, disable this in the settings before deleting the folder.
 
@@ -57,7 +57,7 @@ The active window remains unchanged, as neither the selection nor the translatio
 Double-click the system tray icon to open Settings. The Settings screen is displayed using WebView2, which comes standard with Windows 11.
 
 - Source and target: Same settings as the bar used to select the region
-- Style: Automatic, polite, plain. Auto matches the tone of the original.
+- Style: Automatic, polite, plain. Auto matches the tone of the original. Only with PLaMo 3 Translate.
 - Glossary: A list of words for which you want a fixed translation. It is used only when the word appears in the original text.
 - Read Korean: Becomes available with an additional download
 - Translation model: Select, download, delete, load, unload
@@ -93,8 +93,9 @@ When the target language is English, sentences containing only Latin characters 
 | PLaMo 3 Translate 2B | 1.8GB | Standard |
 | PLaMo 3 Translate 8B | 5.3GB | High quality |
 | PLaMo 3 Translate 31B | 19.5GB | Highest Quality |
+| Hy-MT2 1.8B | 1.1GB | Tencent's model. Apache License 2.0, so it needs no agreement and can be used at work. About as fast as 2B, about 1.7GB of GPU memory. The style setting does not apply. |
 
-Other models can also be used. Placing GGUF files in `data\models` will make them appear in the settings list. Models whose filenames do not start with `plamo-3-translate` are asked to translate through their own chat template.
+Other models can also be used. Placing GGUF files in `data\models` will make them appear in the settings list. Models whose filenames do not start with `plamo-3-translate` are asked to translate through their own chat template. Models whose filenames start with `Hy-MT` are asked in the words of their model card.
 
 If you cancel the download, files left unfinished will be retained, and the next download will pick up from where they left off. If you no longer need them, you can delete them using "Delete."
 
@@ -171,4 +172,6 @@ RENDER_IN=in.png RENDER_OUT=out.png cargo test render_picture -- --ignored --noc
 
 The source code for this app is licensed under the MIT License. The licenses for the bundled materials and models are summarized in [NOTICE.md](NOTICE.md). The full texts are in the `licenses` folder.
 
-PLaMo 3 Translate is provided under the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en), and the model is not included in this repository or the distribution. Until you agree to it in the first-run guide, you cannot translate or download a model. **When using this for business purposes, please read the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en).** Using it for work on a workplace PC also constitutes a commercial use, regardless of whether it runs locally. If your revenue for the most recent fiscal year (including affiliates) is 1 billion yen or less, you must submit the PFN registration form; if it exceeds 1 billion yen, a separate contract is required. When publishing translation results, please clearly indicate that they are PLaMo-generated.
+PLaMo 3 Translate is provided under the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en), and the model is not included in this repository or the distribution. Until you agree to it, you cannot download PLaMo 3 Translate or translate with it. **When using this for business purposes, please read the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en).** Using it for work on a workplace PC also constitutes a commercial use, regardless of whether it runs locally. If your revenue for the most recent fiscal year (including affiliates) is 1 billion yen or less, you must submit the PFN registration form; if it exceeds 1 billion yen, a separate contract is required. When publishing translation results, please clearly indicate that they are PLaMo-generated.
+
+Hy-MT2 is provided by Tencent under the Apache License 2.0, and the model is not included in this repository or the distribution. It needs no agreement and can be used at work.

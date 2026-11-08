@@ -64,7 +64,7 @@ impl Translator {
 
     fn ensure_engine(&mut self) -> Result<(), String> {
         let config = config::get();
-        if !config.license_accepted {
+        if models::needs_license(&config.model) && !config.license_accepted {
             return Err("ライセンスに同意するまで翻訳できません".to_string());
         }
         let options = config.engine_options();
@@ -183,15 +183,20 @@ impl Translator {
     }
 
     /// Lets the model's own template turn the request into a prompt.
-    fn chat_prompt(&self, text: &str, context: &str) -> Result<String, String> {
-        let mut system = format!("Translate the user's text into natural {}. {CHAT_INSTRUCTION}", language_name(&self.wording.target));
-        for (from, to) in terms_in(text, &self.wording.glossary) {
-            system += &format!("\nAlways translate \"{from}\" as \"{to}\".");
-        }
-        if !context.is_empty() {
-            system += &format!("\nThe text comes after this: {context}");
-        }
-        let body = json!({ "messages": [{ "role": "system", "content": system }, { "role": "user", "content": text }] });
+    fn chat_prompt(&self, format: Format, text: &str, context: &str) -> Result<String, String> {
+        let messages = if format == Format::HyMt {
+            json!([{ "role": "user", "content": hy_mt_request(text, context, &self.wording) }])
+        } else {
+            let mut system = format!("Translate the user's text into natural {}. {CHAT_INSTRUCTION}", language_name(&self.wording.target));
+            for (from, to) in terms_in(text, &self.wording.glossary) {
+                system += &format!("\nAlways translate \"{from}\" as \"{to}\".");
+            }
+            if !context.is_empty() {
+                system += &format!("\nThe text comes after this: {context}");
+            }
+            json!([{ "role": "system", "content": system }, { "role": "user", "content": text }])
+        };
+        let body = json!({ "messages": messages });
         let mut response = self
             .agent
             .post(format!("{}/apply-template", self.url))
@@ -217,7 +222,7 @@ impl Translator {
         }
         let (prompt, stop) = match format {
             Format::Plamo => (prompt(text, context, &self.wording), json!(["<|plamo:tag|>", "<|plamo:bos|>"])),
-            Format::Chat => (self.chat_prompt(text, context)?, json!([])),
+            Format::HyMt | Format::Chat => (self.chat_prompt(format, text, context)?, json!([])),
         };
         let body = json!({ "prompt": prompt, "temperature": 0, "n_predict": NUM_PREDICT, "stop": stop, "stream": true });
         let mut response = self
@@ -379,6 +384,28 @@ fn remember(source: &str, translation: &str) {
     history.truncate(HISTORY_MAX);
 }
 
+/// Hy-MT2's own wording from its model card, all in the user turn: it has no system prompt, and
+/// asked this way it translates screen text that reads like an order instead of following it.
+fn hy_mt_request(text: &str, context: &str, wording: &Wording) -> String {
+    let language = language_name(&wording.target);
+    let mut out = String::new();
+    let terms = terms_in(text, &wording.glossary);
+    if !terms.is_empty() {
+        out += "Reference the following translations:\n";
+        for (from, to) in terms {
+            out += &format!("{from} translates to {to}\n");
+        }
+        out += "\n";
+    }
+    let only = "Note that you should only output the translated result without any additional explanation";
+    if context.is_empty() {
+        out += &format!("Translate the following text into {language}. {only}:\n\n{text}");
+    } else {
+        out += &format!("[Background Information]\n{context}\n\nPlease translate the following text into {language}, taking the provided background information into consideration. {only}.\n\n[Source Text]\n{text}");
+    }
+    out
+}
+
 fn language_name(target: &str) -> &str {
     match target {
         "ja" => "Japanese",
@@ -495,6 +522,15 @@ mod tests {
     fn context_comes_before_the_input() {
         let p = prompt("next", "the page so far", &to("ja"));
         assert!(p.contains("translation<|plamo:tag|>context<|plamo:msg|>the page so far<|plamo:tag|>input<|plamo:msg|>next"));
+    }
+
+    #[test]
+    fn hy_mt_gets_its_model_card_wording() {
+        let wording = Wording { glossary: vec![("Inventory".into(), "持ち物".into())], ..to("ja") };
+        let request = hy_mt_request("Open the Inventory.", "", &wording);
+        assert!(request.starts_with("Reference the following translations:\nInventory translates to 持ち物\n\nTranslate the following text into Japanese."));
+        assert!(request.ends_with(":\n\nOpen the Inventory."));
+        assert!(hy_mt_request("next", "the page so far", &to("ja")).starts_with("[Background Information]\nthe page so far\n"));
     }
 
     #[test]

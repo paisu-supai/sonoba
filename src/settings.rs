@@ -138,7 +138,10 @@ fn state() -> Value {
     }
     let list: Vec<Value> = entries
         .iter()
-        .map(|e| json!({ "file": e.file, "label": e.label, "present": models::is_present(&e.file), "partial": models::has_part(&e.file), "download": models::can_download(&e.file) }))
+        .map(|e| {
+            let (present, partial, download, license) = (models::is_present(&e.file), models::has_part(&e.file), models::can_download(&e.file), models::license_of(&e.file));
+            json!({ "file": e.file, "label": e.label, "present": present, "partial": partial, "download": download, "license": license })
+        })
         .collect();
     let device = match config.device {
         Device::Auto => "auto",
@@ -183,7 +186,8 @@ fn state() -> Value {
         "opacity": config.opacity,
         "keep_history": config.keep_history,
         "autostart": autostart(),
-        "intro": !config.license_accepted || (!config.intro_done && !models::is_present(&config.model)),
+        "license_accepted": config.license_accepted,
+        "intro": (models::needs_license(&config.model) && !config.license_accepted) || (!config.intro_done && !models::is_present(&config.model)),
         "intro_done": config.intro_done,
     })
 }
@@ -328,8 +332,8 @@ fn on_message(text: &str) {
         "close" => unsafe {
             DestroyWindow(window());
         },
-        // The licence binds whoever uses the model, so the guide has them accept it first.
-        "download" if config::get().license_accepted => models::start_download(config::get().model),
+        // The PLaMo licence binds whoever uses a PLaMo model, so the page has them accept it first.
+        "download" if !models::needs_license(&config::get().model) || config::get().license_accepted => models::start_download(config::get().model),
         "korean_download" => models::start_download(models::KOREAN_OCR.to_string()),
         "korean_delete" => {
             if let Err(e) = models::delete(models::KOREAN_OCR) {

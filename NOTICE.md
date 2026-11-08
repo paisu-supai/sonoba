@@ -6,7 +6,11 @@ Sonoba itself is under the MIT License (see LICENSE). It uses the following. The
 
 Built with PLaMo.
 
-The model is not included in this repository or in release packages. The app downloads it from Hugging Face when the user asks, under the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en) ([Japanese](https://plamo.preferredai.jp/info/plamo-community-license-ja)), which the user accepts by downloading it.
+The model is not included in this repository or in release packages. The app downloads it from Hugging Face when the user asks, under the [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en) ([Japanese](https://plamo.preferredai.jp/info/plamo-community-license-ja)), which the app asks the user to accept before downloading or using it.
+
+## Hy-MT2
+
+The model is not included in this repository or in release packages. The app downloads it from Hugging Face ([tencent/Hy-MT2-1.8B-GGUF](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF)) when the user asks, under the [Apache License 2.0](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/blob/main/LICENSE.txt).
 
 ## PP-OCRv6
 
