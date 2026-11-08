@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::Ordering;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
-use webview2_com::{CoTaskMemPWSTR, CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler};
+use webview2_com::{CoTaskMemPWSTR, CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler};
 use windows::Win32::Foundation::{HWND as ComHwnd, RECT as ComRect};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows_sys::Win32::Foundation::*;
@@ -410,7 +410,11 @@ fn start_page(hwnd: HWND) -> windows::core::Result<()> {
         }));
         unsafe { environment.CreateCoreWebView2Controller(ComHwnd(hwnd), &created) }
     }));
-    unsafe { CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &folder, None, &handler) }
+    // The page is a plain form, and overlay tools such as RTSS crash the WebView2 GPU process (issue #1).
+    let options = CoreWebView2EnvironmentOptions::default();
+    unsafe { options.set_additional_browser_arguments("--disable-gpu".into()) };
+    let options = ICoreWebView2EnvironmentOptions::from(options);
+    unsafe { CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &folder, &options, &handler) }
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
