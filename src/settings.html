@@ -107,6 +107,11 @@ dialog .actions { padding: 8px 0 0; justify-content: flex-end; }
 }
 .choice[aria-pressed=true] { border-color: var(--accent); background: var(--accent-soft); }
 .choice small { color: var(--soft); }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.seg button { all: unset; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.seg button[aria-pressed=true] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.seg button:focus-visible { outline: 2px solid var(--accent); }
+#intro .seg { justify-content: flex-start; margin: 2px 0 0; }
 .steps { color: var(--soft); font-size: 12.5px; margin-bottom: 18px; }
 .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 14px; }
 .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin-bottom: 14px; }
@@ -168,7 +173,9 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
   <section id="model">
     <h1 data-t="nav_model"></h1>
     <div class="card">
-      <div class="row"><div><b data-t="model"></b></div><select id="models"></select></div>
+      <div class="row"><div><b data-t="model"></b></div><div class="seg" id="families"></div></div>
+      <div class="row" id="size_row"><div><b data-t="size"></b><small id="model_info"></small></div><div class="seg" id="sizes"></div></div>
+      <div class="row" id="file_row"><div><b data-t="other_file"></b></div><select id="models"></select></div>
       <div class="row" id="lic_row"><div><b id="lic_name"></b><small id="lic_hint"></small></div><a id="lic_link" data-t="license_link"></a></div>
       <label class="agree" id="lic_agree_row"><input type="checkbox" id="lic_agree_model"><span data-t="lic_check"></span></label>
       <div class="bar" id="bar"><i></i></div>
@@ -255,8 +262,10 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
     <div class="step" data-step="1">
       <h1 data-t="pick_model"></h1>
       <p data-t="pick_model_note"></p>
-      <div id="intro_models"></div>
-      <p class="hint" style="margin:10px 2px 0" data-t="other_gguf"></p>
+      <div id="intro_families"></div>
+      <div class="seg" id="intro_sizes"></div>
+      <p class="hint" id="intro_info" style="margin:8px 2px 0"></p>
+      <p class="hint" style="margin:10px 2px 0"><span data-t="more_models"></span> <span data-t="other_gguf"></span></p>
       <div class="foot"><span class="steps">2 / 4</span>
         <span><button class="btn" data-back data-t="prev"></button> <button class="btn" data-skip data-t="later"></button> <button class="btn main" data-next data-t="next"></button></span></div>
     </div>
@@ -330,7 +339,10 @@ const TEXT = {
     autostart: 'Windows の起動時に開始する', autostart_note: 'アプリのフォルダを移動したら入れ直してください', ui_lang: '表示の言語',
     license_note: 'PLaMo コミュニティライセンスで提供されています', license_link: 'ライセンスを読む', folder: '設定とモデルの保存先',
     hello: 'ようこそ', hello_note: '画面の文字を、その場で訳文に置き換えます。翻訳はこの PC の中で完結します。表示の言語を選んでください。',
-    next: '次へ', pick_model: '翻訳モデルを選ぶ', pick_model_note: 'あとから変えられます。迷ったら PLaMo 3 Translate 2B を選んでください。', later: 'あとで',
+    next: '次へ', pick_model: '翻訳モデルを選ぶ', pick_model_note: 'あとから変えられます。迷ったら、このまま PLaMo 3 Translate の標準で進んでください。',
+    fam_plamo: 'PFN のモデル。使うにはライセンスへの同意が必要です', fam_hymt: 'Tencent のモデル。同意の手続きは要りません', fam_other: 'その他のファイル',
+    more_models: '大きいモデルはあとで設定の「モデル」からダウンロードできます。', tier_light: '軽量', tier_standard: '標準', tier_high: '高品質', tier_best: '最高品質', size: '大きさ', other_file: 'ファイル', downloaded: 'ダウンロード済み',
+    info_file: 'ファイル', info_sep: '・', info_mem: '使うメモリ 約', later: 'あとで',
     lic_title: 'ライセンスへの同意', lic_note: '翻訳モデルの PLaMo 3 Translate は、Preferred Networks（PFN）の PLaMo コミュニティライセンスで提供されています。使うにはこのライセンスへの同意が必要です。主な内容は次のとおりです。',
     lic_personal: '個人の学習や趣味、学術用途は、登録なしで無料です。',
     lic_business: '会社の業務など組織内の利用は商業目的にあたります。事前に PFN への登録が必要で、直近の事業年度の売上が関係会社を含めて 10 億円を超えると別の契約が必要です。',
@@ -372,7 +384,10 @@ const TEXT = {
     autostart: 'Start with Windows', autostart_note: 'Turn this on again after moving the app folder', ui_lang: 'Language',
     license_note: 'Provided under the PLaMo Community License', license_link: 'Read the license', folder: 'Settings and models are stored in',
     hello: 'Welcome', hello_note: 'Replaces the text on your screen with its translation, right where it is. Translation stays on this PC. Choose your language.',
-    next: 'Next', pick_model: 'Choose a translation model', pick_model_note: 'You can change it later. If unsure, take PLaMo 3 Translate 2B.', later: 'Later',
+    next: 'Next', pick_model: 'Choose a translation model', pick_model_note: 'You can change it later. If unsure, go on with PLaMo 3 Translate Standard.',
+    fam_plamo: 'By PFN. Using it needs agreeing to its license', fam_hymt: 'By Tencent. No agreement needed', fam_other: 'Other files',
+    more_models: 'Larger models can be downloaded later from Model in the settings.', tier_light: 'Light', tier_standard: 'Standard', tier_high: 'High quality', tier_best: 'Best quality', size: 'Size', other_file: 'File', downloaded: 'Downloaded',
+    info_file: 'File', info_sep: ' · ', info_mem: 'memory about', later: 'Later',
     lic_title: 'License agreement', lic_note: 'The translation model, PLaMo 3 Translate, is provided by Preferred Networks (PFN) under the PLaMo Community License. Using it requires accepting that license. In short:',
     lic_personal: 'Personal learning, hobbies and academic use are free, with no registration.',
     lic_business: 'Use within an organization, such as at work, counts as commercial. It requires registering with PFN first, and a separate agreement if the last fiscal year\'s revenue, affiliates included, exceeds 1 billion yen.',
@@ -409,6 +424,51 @@ function options(select, list, value) {
   }
   if (document.activeElement !== select || select.dataset.sent === String(value)) select.value = String(value);
 }
+const FAMILY = { plamo: ['PLaMo 3 Translate', 'fam_plamo'], hymt: ['Hy-MT2', 'fam_hymt'] };
+function pickModel(file) { if (state.progress < 0) send('model', file); }
+function pickFamily(family) {
+  const now = state.models.find(x => x.file === state.model) ?? {};
+  const list = state.models.filter(x => x.family === family);
+  const same = list.find(x => x.tier === now.tier) ?? list.find(x => x.tier === 'standard') ?? list[0];
+  if (same) pickModel(same.file);
+}
+// The family as buttons (cards in the guide), the sizes of the chosen family, and a line on the chosen model.
+function renderPicker(s, famBox, sizeBox, info, cards) {
+  const m = s.models.find(x => x.file === s.model) ?? {};
+  const fams = Object.keys(FAMILY).filter(f => s.models.some(x => x.family === f));
+  if (!cards && s.models.some(x => !x.family)) fams.push('other');
+  const key = s.ui_lang + fams.join();
+  if (famBox.dataset.drawn !== key) {
+    famBox.textContent = ''; famBox.dataset.drawn = key;
+    for (const f of fams) {
+      const b = document.createElement('button');
+      b.dataset.family = f;
+      if (cards) {
+        b.className = 'choice'; b.innerHTML = '<span></span><small></small>';
+        b.children[0].textContent = FAMILY[f][0]; b.children[1].textContent = T(FAMILY[f][1]);
+      } else b.textContent = f === 'other' ? T('fam_other') : FAMILY[f][0];
+      b.onclick = () => f === 'other' ? pickModel(state.models.find(x => !x.family).file) : pickFamily(f);
+      famBox.append(b);
+    }
+  }
+  for (const b of famBox.children) b.setAttribute('aria-pressed', b.dataset.family === (m.family ?? 'other'));
+  // The guide keeps to the light and standard sizes; the larger ones are in the model tab.
+  const sizes = m.family ? s.models.filter(x => x.family === m.family && (!cards || ['light', 'standard'].includes(x.tier) || x.file === s.model)) : [];
+  const sizeKey = s.ui_lang + sizes.map(x => x.file + x.present).join();
+  if (sizeBox.dataset.drawn !== sizeKey) {
+    sizeBox.textContent = ''; sizeBox.dataset.drawn = sizeKey;
+    for (const x of sizes) {
+      const b = document.createElement('button');
+      b.dataset.file = x.file;
+      b.textContent = T('tier_' + x.tier) + ' ' + x.size + (x.present ? ' ✓' : '');
+      b.title = x.present ? T('downloaded') : '';
+      b.onclick = () => pickModel(x.file);
+      sizeBox.append(b);
+    }
+  }
+  for (const b of sizeBox.children) b.setAttribute('aria-pressed', b.dataset.file === s.model);
+  info.textContent = m.gb ? T('info_file') + ' ' + m.gb + 'GB' + (m.memory_gb ? T('info_sep') + T('info_mem') + ' ' + m.memory_gb + 'GB' : '') : '';
+}
 function show(id) {
   page = id;
   for (const s of document.querySelectorAll('section')) s.classList.toggle('on', s.id === id);
@@ -443,7 +503,7 @@ function render(s) {
   for (const el of document.querySelectorAll('[data-t]')) el.textContent = T(el.dataset.t);
   options($('source'), [['auto', T('src_auto')], ['ja', T('src_ja')]], s.source);
   options($('target'), [['ja', T('tgt_ja')], ['ja(easy)', T('tgt_easy')], ['en', T('tgt_en')], ['ko', T('tgt_ko')], ['zh-hans', T('tgt_hans')], ['zh-hant', T('tgt_hant')]], s.target);
-  options($('models'), s.models.map(m => [m.file, m.label]), s.model);
+  options($('models'), s.models.filter(m => !m.family).map(m => [m.file, m.file]), s.model);
   options($('device'), [['auto', T('dev_auto')], ['gpu', T('dev_gpu')], ['cpu', T('dev_cpu')]], s.device);
   options($('gpu_limit'), GPU_LIMITS.map(v => [v ?? '', v === null ? T('no_limit') : (v / 1024) + ' GB']), s.gpu_limit ?? '');
   const threads = [['', T('auto') + ' (' + s.cpu_auto + ')']];
@@ -484,6 +544,9 @@ function render(s) {
   $('korean_delete').hidden = !(s.korean.present || s.korean.partial) || packDown;
   $('download').textContent = T(downloading ? 'cancel' : 'download');
   $('download').disabled = packDown || !((downloading && s.progress !== 100) || (!downloading && !m.present && m.download && !needsLicense(s, m)));
+  renderPicker(s, $('families'), $('sizes'), $('model_info'), false);
+  $('size_row').hidden = !m.family;
+  $('file_row').hidden = !!m.family || !s.models.some(x => !x.family);
   $('lic_name').textContent = T(m.license === 'plamo' ? 'lic_plamo' : m.license === 'apache' ? 'lic_apache' : 'lic_other');
   $('lic_hint').textContent = licenseHint(s, m);
   $('lic_link').hidden = !licenseUrl(s, m);
@@ -544,21 +607,7 @@ function renderIntro(s, m, downloading) {
   if (!introOpen) return;
   for (const el of document.querySelectorAll('.step')) el.classList.toggle('on', +el.dataset.step === step);
   for (const b of document.querySelectorAll('[data-lang]')) b.setAttribute('aria-pressed', b.dataset.lang === s.ui_lang);
-  const box = $('intro_models');
-  const entries = s.models.filter(x => x.download);
-  if (box.dataset.lang !== s.ui_lang) {
-    box.textContent = ''; box.dataset.lang = s.ui_lang;
-    for (const e of entries) {
-      const b = document.createElement('button');
-      b.className = 'choice'; b.dataset.file = e.file;
-      const [name, note] = e.label.replace(')', '').split(' (');
-      b.innerHTML = '<span></span><small></small>';
-      b.children[0].textContent = name; b.children[1].textContent = note;
-      b.onclick = () => { if (state.progress < 0) send('model', e.file); };
-      box.append(b);
-    }
-  }
-  for (const b of box.children) b.setAttribute('aria-pressed', b.dataset.file === s.model);
+  renderPicker(s, $('intro_families'), $('intro_sizes'), $('intro_info'), true);
   const needs = needsLicense(s, m);
   $('lic_head').textContent = T(needs ? 'lic_title' : 'lic_title_plain');
   $('lic_plamo').hidden = !needs;

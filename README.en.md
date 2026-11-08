@@ -16,7 +16,7 @@ Built with PLaMo.
 
 ## Getting started
 
-The supported OS is Windows 11. No installation is required. The Visual C++ runtime is included in the zip file, so it works without installing it separately. Extract the zip file to your preferred folder and launch `sonoba.exe`. The first time you run it, a guide opens: select the display language and a translation model. If you choose PLaMo 3 Translate, the guide asks you to agree to the PLaMo Community License before the download, and PLaMo 3 Translate does not translate until you agree. Hy-MT2 needs no agreement.
+The supported OS is Windows 11. No installation is required. The Visual C++ runtime is included in the zip file, so it works without installing it separately. Extract the zip file to your preferred folder and launch `sonoba.exe`. The first time you run it, a guide opens: select the display language and a translation model. The guide offers the light and standard sizes; larger models can be downloaded later from Model in the settings. If you choose PLaMo 3 Translate, the guide asks you to agree to the PLaMo Community License before the download, and PLaMo 3 Translate does not translate until you agree. Hy-MT2 needs no agreement.
 
 Settings and models are saved in the `data` folder next to the exe. Deleting the entire folder will also delete the app. To update, overwrite the folder with the contents of a new zip file. If you place the app in a location it cannot write to, such as Program Files, they are saved in the `Sonoba` folders in `%APPDATA%` and `%LOCALAPPDATA%`. If you are using auto-start, disable this in the settings before deleting the folder.
 

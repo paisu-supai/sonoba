@@ -1,6 +1,5 @@
 //! The models: PLaMo 3 Translate in its four sizes and Hy-MT2, plus any GGUF file dropped into the folder.
 
-use crate::i18n::t;
 use serde_json::Value;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -11,13 +10,28 @@ use std::time::Duration;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub const DEFAULT: &str = "plamo-3-translate-2b-Q4_K_M.gguf";
-/// (file, Hugging Face repository, name, note, license)
-const CATALOG: [(&str, &str, &str, &str, &str); 5] = [
-    ("plamo-3-translate-0.8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-0.8b-GGUF", "PLaMo 3 Translate 0.8B", "軽量、0.6GB", "plamo"),
-    ("plamo-3-translate-2b-Q4_K_M.gguf", "pfnet/plamo-3-translate-2b-GGUF", "PLaMo 3 Translate 2B", "標準、1.8GB", "plamo"),
-    ("plamo-3-translate-8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-8b-GGUF", "PLaMo 3 Translate 8B", "高品質、5.3GB", "plamo"),
-    ("plamo-3-translate-31b-Q4_K_M.gguf", "pfnet/plamo-3-translate-31b-GGUF", "PLaMo 3 Translate 31B", "最高品質、19.5GB", "plamo"),
-    ("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "Hy-MT2 1.8B", "Apache 2.0、1.1GB", "apache"),
+/// A model the app can download. The settings page shows it as a family, then a size.
+struct Known {
+    file: &'static str,
+    repo: &'static str, // on Hugging Face
+    family: &'static str,
+    size: &'static str,
+    tier: &'static str,
+    gb: f64,                 // the file
+    memory_gb: Option<f64>, // GPU memory once loaded, where measured (RTX 4070 Ti, Vulkan, 4 slots)
+    license: &'static str,
+}
+
+const fn known(file: &'static str, repo: &'static str, family: &'static str, size: &'static str, tier: &'static str, gb: f64, memory_gb: Option<f64>, license: &'static str) -> Known {
+    Known { file, repo, family, size, tier, gb, memory_gb, license }
+}
+
+const CATALOG: [Known; 5] = [
+    known("plamo-3-translate-0.8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-0.8b-GGUF", "plamo", "0.8B", "light", 0.6, Some(0.65), "plamo"),
+    known("plamo-3-translate-2b-Q4_K_M.gguf", "pfnet/plamo-3-translate-2b-GGUF", "plamo", "2B", "standard", 1.8, Some(2.1), "plamo"),
+    known("plamo-3-translate-8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-8b-GGUF", "plamo", "8B", "high", 5.3, None, "plamo"),
+    known("plamo-3-translate-31b-Q4_K_M.gguf", "pfnet/plamo-3-translate-31b-GGUF", "plamo", "31B", "best", 19.5, None, "plamo"),
+    known("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "hymt", "1.8B", "standard", 1.1, Some(1.7), "apache"),
 ];
 const SOURCE: &str = "https://huggingface.co";
 pub const KOREAN_OCR: &str = "korean_PP-OCRv5_mobile_rec.onnx"; // saved beside the models
@@ -56,24 +70,28 @@ pub fn needs_license(file: &str) -> bool {
 
 /// The license the settings page shows: PLaMo's for any PLaMo file, the catalog's for the rest.
 pub fn license_of(file: &str) -> Option<&'static str> {
-    if needs_license(file) { Some("plamo") } else { CATALOG.iter().find(|e| e.0 == file).map(|e| e.4) }
+    if needs_license(file) { Some("plamo") } else { CATALOG.iter().find(|k| k.file == file).map(|k| k.license) }
 }
 
 pub struct Entry {
     pub file: String,
-    pub label: String,
+    pub family: Option<&'static str>, // None: a file dropped into the folder
+    pub size: &'static str,
+    pub tier: &'static str,
+    pub gb: Option<f64>,
+    pub memory_gb: Option<f64>,
 }
 
 /// The catalog, then whatever else the folder holds.
 pub fn list() -> Vec<Entry> {
     let mut entries: Vec<Entry> = CATALOG
         .iter()
-        .map(|(file, _, name, note, _)| Entry { file: file.to_string(), label: format!("{name} ({})", t(note)) })
+        .map(|k| Entry { file: k.file.to_string(), family: Some(k.family), size: k.size, tier: k.tier, gb: Some(k.gb), memory_gb: k.memory_gb })
         .collect();
     if let Ok(folder) = std::fs::read_dir(dir()) {
         for file in folder.flatten().filter_map(|f| f.file_name().into_string().ok()) {
             if file.ends_with(".gguf") && !entries.iter().any(|e| e.file == file) {
-                entries.push(Entry { label: file.clone(), file });
+                entries.push(Entry { file, family: None, size: "", tier: "", gb: None, memory_gb: None });
             }
         }
     }
@@ -102,7 +120,7 @@ pub fn has_part(file: &str) -> bool {
 }
 
 pub fn can_download(file: &str) -> bool {
-    CATALOG.iter().any(|e| e.0 == file)
+    CATALOG.iter().any(|k| k.file == file)
 }
 
 pub fn delete(file: &str) -> std::io::Result<()> {
@@ -143,7 +161,7 @@ fn download(file: &str) -> Result<(), String> {
     let (repo, remote) = if file == KOREAN_OCR {
         (KOREAN_REPO.to_string(), KOREAN_REMOTE)
     } else {
-        let repo = CATALOG.iter().find(|e| e.0 == file).map(|e| e.1).ok_or("このモデルはダウンロードできません")?;
+        let repo = CATALOG.iter().find(|k| k.file == file).map(|k| k.repo).ok_or("このモデルはダウンロードできません")?;
         (repo.to_string(), file)
     };
     let (total, hash) = expected(&repo, remote)?;
@@ -210,7 +228,8 @@ mod tests {
 
     #[test]
     fn the_catalog_covers_every_size_and_the_default() {
-        assert_eq!(list().iter().take(5).filter(|e| can_download(&e.file)).count(), 5);
+        assert_eq!(list().iter().take(5).filter(|e| can_download(&e.file) && e.family.is_some()).count(), 5);
+        assert!(CATALOG.iter().filter(|k| k.family == "plamo").any(|k| k.file == DEFAULT && k.tier == "standard"));
         assert!(can_download(DEFAULT) && can_download("Hy-MT2-1.8B-Q4_K_M.gguf"));
         assert!(!can_download("gemma-4-q4.gguf"));
     }

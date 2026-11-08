@@ -140,7 +140,8 @@ fn state() -> Value {
         .iter()
         .map(|e| {
             let (present, partial, download, license) = (models::is_present(&e.file), models::has_part(&e.file), models::can_download(&e.file), models::license_of(&e.file));
-            json!({ "file": e.file, "label": e.label, "present": present, "partial": partial, "download": download, "license": license })
+            json!({ "file": e.file, "family": e.family, "size": e.size, "tier": e.tier, "gb": e.gb, "memory_gb": e.memory_gb,
+                    "present": present, "partial": partial, "download": download, "license": license })
         })
         .collect();
     let device = match config.device {
