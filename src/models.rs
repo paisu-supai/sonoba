@@ -32,8 +32,8 @@ const CATALOG: [Known; 6] = [
     known("plamo-3-translate-8b-Q4_K_M.gguf", "pfnet/plamo-3-translate-8b-GGUF", "plamo", "8B", "high", 5.3, None, "plamo"),
     known("plamo-3-translate-31b-Q4_K_M.gguf", "pfnet/plamo-3-translate-31b-GGUF", "plamo", "31B", "best", 19.5, None, "plamo"),
     // Tencent's own smaller files need kernels llama.cpp does not have yet; unsloth's 3-bit one is the smallest that stays sound.
-    known("Hy-MT2-1.8B-UD-IQ3_XXS.gguf", "unsloth/Hy-MT2-1.8B-GGUF", "hymt", "1.8B", "light", 0.8, Some(1.4), "apache"),
-    known("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "hymt", "1.8B", "standard", 1.1, Some(1.7), "apache"),
+    known("Hy-MT2-1.8B-UD-IQ3_XXS.gguf", "unsloth/Hy-MT2-1.8B-GGUF", "hymt", "1.8B 3bit", "light", 0.8, Some(1.4), "apache"),
+    known("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "hymt", "1.8B 4bit", "standard", 1.1, Some(1.7), "apache"),
 ];
 const SOURCE: &str = "https://huggingface.co";
 pub const KOREAN_OCR: &str = "korean_PP-OCRv5_mobile_rec.onnx"; // saved beside the models
