@@ -21,6 +21,8 @@ const BOLD_STEM: usize = 8; // a stem wider than 1/8 of the line height, less on
 const MIN_BOLD_LINE: i32 = 16; // small text is all antialiasing, so weight cannot be told
 const STATUS_BG: u32 = 0x00201C1C;
 const STATUS_FG: u32 = 0x00F5F5F5;
+const MOVED_TENTHS: usize = 9; // of a patch's rows found again where it moved to
+const MIN_SCROLL_ROWS: usize = 8;
 
 /// The ink of one text line.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -376,6 +378,59 @@ impl Patch {
         self.changed_percent(frame, basis, width) > GLYPH_STALE_PERCENT
     }
 
+    /// True if the text under this patch is found `dy` pixels further down in `frame` (up when
+    /// negative), all of it still in the picture.
+    pub fn moved(&self, frame: &[u8], basis: &[u8], width: usize, dy: i32) -> bool {
+        let height = (frame.len() / 4 / width) as i32;
+        if basis.len() != frame.len() || self.h <= 0 || self.x < 0 || self.x + self.w > width as i32 || self.y < 0 || self.y + self.h > height {
+            return false;
+        }
+        if self.y + dy < 0 || self.y + self.h + dy > height {
+            return false;
+        }
+        let (start, n) = (|y: i32| (y as usize * width + self.x as usize) * 4, self.w as usize * 4);
+        let same = (self.y..self.y + self.h).filter(|&y| basis[start(y)..start(y) + n] == frame[start(y + dy)..start(y + dy) + n]).count();
+        same * 10 >= self.h as usize * MOVED_TENTHS
+    }
+}
+
+/// How far the picture inside `rect` (left, top, right, bottom) has moved down since `basis`, or
+/// up when negative: a chat pushing its lines up for a new one, a log, a page being scrolled.
+/// Most of its rows that are not one flat colour must be found again that far off.
+// shortcut: whole rows only, so a page that scrolls beside a still sidebar in the same rows is not
+// followed; matching each block's own columns would be the upgrade.
+pub fn scroll(basis: &[u8], frame: &[u8], width: usize, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> Option<i32> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    if basis.len() != frame.len() || x0 >= x1 || y0 >= y1 || y1 * width * 4 > frame.len() {
+        return None;
+    }
+    let rows = |image: &[u8]| -> Vec<Option<u64>> {
+        (y0..y1)
+            .map(|y| {
+                let row = &image[(y * width + x0) * 4..(y * width + x1) * 4];
+                let flat = row.chunks_exact(4).all(|p| p[..3] == row[..3]);
+                (!flat).then(|| {
+                    let mut hasher = DefaultHasher::new();
+                    row.hash(&mut hasher);
+                    hasher.finish()
+                })
+            })
+            .collect()
+    };
+    let (was, now) = (rows(basis), rows(frame));
+    let n = now.len() as i32;
+    let found = |dy: i32| (0..n).filter(|&y| (0..n).contains(&(y - dy)) && now[y as usize].is_some() && now[y as usize] == was[(y - dy) as usize]).count();
+    let inked = now.iter().filter(|row| row.is_some()).count();
+    let (dy, best) = (1..=n * 3 / 4).flat_map(|d| [-d, d]).map(|dy| (dy, found(dy))).max_by_key(|&(dy, count)| (count, -dy.abs()))?;
+    (best * 2 > inked && best > found(0) && best >= MIN_SCROLL_ROWS).then_some(dy)
+}
+
+impl Patch {
+    pub fn shifted(mut self, dy: i32) -> Self {
+        self.y += dy;
+        self
+    }
+
     /// A message in the region's top left corner, sized to its text.
     pub fn status(text: &str, width: i32) -> Self {
         Self {
@@ -505,6 +560,52 @@ mod tests {
         paint(&mut img, 200, (60, 11, 62, 16), BLACK, 1); // the l of "personal"
         let g = glyphs(&img, 200, 40, (0, 0, 200, 40), Some("word")).unwrap();
         assert_eq!((g.y, g.h), (11, 17));
+    }
+
+    /// A line of "text": every row differs, as the rows of real letters do.
+    fn text_line(img: &mut [u8], w: usize, (x0, y0, x1, h): (usize, usize, usize, usize), seed: usize) {
+        for y in y0..y0 + h {
+            let row = y - y0; // the same line looks the same wherever it is
+            for x in (x0..x1).filter(|&x| (x.wrapping_mul(2654435761) ^ row.wrapping_mul(40503) ^ seed.wrapping_mul(97)) >> 5 & 3 == 0) {
+                img[(y * w + x) * 4..][..3].copy_from_slice(&BLACK);
+            }
+        }
+    }
+
+    /// A chat: a still heading, then five lines 30 pixels apart, the first one `first`.
+    fn chat(first: usize) -> Vec<u8> {
+        let mut img = canvas(200, 200, WHITE);
+        text_line(&mut img, 200, (10, 4, 190, 12), 99);
+        for (i, y) in [40, 70, 100, 130, 160].into_iter().enumerate() {
+            text_line(&mut img, 200, (10, y, 190, 14), first + i);
+        }
+        img
+    }
+
+    fn patch_at(y: i32) -> Patch {
+        let mut p = Patch::status("訳", 0);
+        (p.x, p.y, p.w, p.h) = (8, y - 2, 184, 18);
+        p
+    }
+
+    #[test]
+    fn a_chat_taking_a_new_line_has_moved_up_by_one() {
+        let (basis, frame) = (chat(1), chat(2));
+        assert_eq!(scroll(&basis, &frame, 200, (0, 0, 200, 200)), Some(-30));
+        assert!(patch_at(100).moved(&frame, &basis, 200, -30)); // the third line is now the second
+        assert!(!patch_at(100).moved(&frame, &basis, 200, 0));
+        assert!(!patch_at(40).moved(&frame, &basis, 200, -60)); // the first has left the picture
+        assert!(!patch_at(4 + 2).moved(&frame, &basis, 200, -30)); // the heading stays
+    }
+
+    #[test]
+    fn a_page_changing_in_place_has_not_scrolled() {
+        let basis = chat(1);
+        assert_eq!(scroll(&basis, &basis, 200, (0, 0, 200, 200)), None);
+        let mut frame = basis.clone();
+        paint(&mut frame, 200, (10, 100, 190, 114), WHITE, 1);
+        text_line(&mut frame, 200, (10, 100, 190, 14), 42); // one line rewritten where it was
+        assert_eq!(scroll(&basis, &frame, 200, (0, 0, 200, 200)), None);
     }
 
     #[test]
