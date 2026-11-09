@@ -34,7 +34,7 @@ use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, O
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
+use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -1951,6 +1951,11 @@ fn main() {
     unsafe {
         CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32); // WebView2 asks for it
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Windows slows down a process with no window in the taskbar, as this one sits in the tray,
+        // and OCR took four times as long. It only ever works for what is on the screen.
+        let full_speed = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: 0 };
+        let size = size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &full_speed as *const _ as *const _, size);
         register_class(w!("SonobaMain"), Some(main_proc), IDC_ARROW);
         register_class(w!("SonobaSelect"), Some(select_proc), IDC_CROSS);
         register_class(w!("SonobaOverlay"), Some(overlay_proc), IDC_ARROW);
