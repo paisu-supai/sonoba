@@ -665,7 +665,7 @@ mod tests {
         let lines = with_korean().read(&bgra, w, h).unwrap();
         let got = paragraphs(&lines).iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join(" / ");
         println!("{got}");
-        assert!(got.contains("화면의 글자를 번역합니다") && got.contains("언어를 바꿀 수 있습니다"), "{got}");
+        assert!(got.contains("이 프로그램은 화면의 글자를 번역합니다") && got.contains("언어를 바꿀 수 있습니다"), "{got}");
     }
 
     fn with_korean() -> Ocr {
