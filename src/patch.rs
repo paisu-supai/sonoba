@@ -179,6 +179,31 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
         }
     }
 
+    // Marks a few blank rows off the letters, like the Thai vowels written under a consonant:
+    // a short band of sparse ink with a blank row past it. The next line's letters are denser,
+    // or run on to the box's edge. Marks between two lines go with the nearer one.
+    let row_ink = |row: usize| cols.iter().filter(|&&col| is_ink(col, row)).count();
+    let tall = bottom - top;
+    let peak = (top..bottom).map(row_ink).max().unwrap_or(0);
+    let gap = tall / 6 + 2;
+    let marks = |rows: std::ops::Range<usize>| rows.len() * 3 <= tall && rows.clone().all(|row| row_ink(row) * 4 <= peak);
+    if let Some(start) = (bottom..(bottom + gap).min(y1)).find(|&row| row_ink(row) > 0) {
+        if let Some(end) = (start..y1).find(|&row| row_ink(row) == 0) {
+            let beyond = (end..y1).find(|&row| row_ink(row) > 0).map_or(usize::MAX, |row| row - end);
+            if marks(start..end) && beyond >= start - bottom {
+                bottom = end;
+            }
+        }
+    }
+    if let Some(end) = (top.saturating_sub(gap).max(y0)..top).rev().find(|&row| row_ink(row) > 0).map(|row| row + 1) {
+        if let Some(start) = (y0..end).rev().find(|&row| row_ink(row) == 0).map(|row| row + 1) {
+            let beyond = (y0..start).rev().find(|&row| row_ink(row) > 0).map_or(usize::MAX, |row| start - 1 - row);
+            if marks(start..end) && beyond >= top - end {
+                top = start;
+            }
+        }
+    }
+
     // Two lines with no blank row between them: a row far thinner than the solid rows on both
     // sides of it is the seam, and the line is the part holding the middle of the box.
     let ink: Vec<usize> = (top..bottom).map(|row| cols.iter().filter(|&&col| is_ink(col, row)).count()).collect();
@@ -480,6 +505,40 @@ mod tests {
         paint(&mut img, 200, (60, 11, 62, 16), BLACK, 1); // the l of "personal"
         let g = glyphs(&img, 200, 40, (0, 0, 200, 40), Some("word")).unwrap();
         assert_eq!((g.y, g.h), (11, 17));
+    }
+
+    #[test]
+    fn marks_a_few_rows_under_the_letters_belong_to_the_line() {
+        let mut img = canvas(300, 60, WHITE);
+        paint(&mut img, 300, (20, 12, 280, 20), BLACK, 6); // marks over the letters, touching them
+        paint(&mut img, 300, (20, 20, 280, 35), BLACK, 3); // the letters
+        paint(&mut img, 300, (40, 37, 44, 42), BLACK, 1); // Thai vowels two rows under them
+        paint(&mut img, 300, (150, 37, 154, 42), BLACK, 1);
+        let g = glyphs(&img, 300, 60, (0, 0, 300, 60), Some("word")).unwrap();
+        assert_eq!((g.y, g.h), (12, 30));
+    }
+
+    #[test]
+    fn marks_between_two_lines_go_with_the_nearer_one() {
+        let mut img = canvas(300, 70, WHITE);
+        paint(&mut img, 300, (20, 10, 280, 24), BLACK, 3); // the first line
+        paint(&mut img, 300, (40, 26, 44, 30), BLACK, 1); // its vowels below, two rows off
+        paint(&mut img, 300, (20, 33, 280, 37), BLACK, 12); // the second line's marks above it
+        paint(&mut img, 300, (20, 38, 280, 53), BLACK, 3); // the second line
+        let first = glyphs(&img, 300, 70, (0, 0, 300, 40), Some("word")).unwrap();
+        let second = glyphs(&img, 300, 70, (0, 20, 300, 40), Some("word")).unwrap();
+        assert_eq!([(first.y, first.h), (second.y, second.h)], [(10, 20), (33, 20)]);
+    }
+
+    #[test]
+    fn the_next_line_a_few_rows_down_is_not_taken_for_marks() {
+        let mut img = canvas(300, 60, WHITE);
+        paint(&mut img, 300, (20, 12, 280, 26), BLACK, 3); // this line
+        paint(&mut img, 300, (20, 29, 280, 43), BLACK, 3); // the next line, three rows down
+        for box_h in [50, 40] { // the box holds all of the next line, or cuts it
+            let g = glyphs(&img, 300, 60, (0, 0, 300, box_h), Some("word")).unwrap();
+            assert_eq!((g.y, g.h), (12, 14), "{box_h}");
+        }
     }
 
     #[test]
