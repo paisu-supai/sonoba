@@ -52,11 +52,13 @@ The selected region is linked to the window below it. Moving the window moves th
 
 The active window remains unchanged, as neither the selection nor the translation takes keyboard focus. Clicking or scrolling will move through the translation to reach the window below.
 
-To show translations in screen sharing and recordings, turn on "Show live translations in screen sharing and recordings" in the settings. When the region is inside one window, translations then appear when the whole screen is shared or recorded. To share a single window, pick "Sonoba for sharing" instead of the original window. It appears in the taskbar once a translation starts, and shows the original window with the translations over it. It sits off the screen, so it never gets in the way.
+To show translations in screen sharing and recordings, turn on "Show live translations in screen sharing and recordings" in the settings. When the region is inside one window, translations then appear when the whole screen is shared or recorded. Regions added with Shift appear too, as long as they all lie in the same window. To share a single window, pick "Sonoba for sharing" instead of the original window. It appears in the taskbar once a translation starts, and shows the original window with the translations over it. It sits off the screen, so it never gets in the way.
 
 - In Discord, picking this window shares no sound from the original app. To share the sound too, share the whole screen.
 - In OBS's Window Capture, set Capture Method to "Windows 10 (1903 and up)". BitBlt shows it black.
 - A minimized share window shows nothing. When the translation stops, it keeps showing the last translated window.
+- When another window is brought in front of the original, the translations on screen go behind it. "Sonoba for sharing" still shows them all.
+- For a region across several windows, or on the desktop, "Sonoba for sharing" keeps showing the previous window without translations. It never shows the desktop.
 
 ## Settings
 
@@ -142,8 +144,8 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 ## How It Works
 
 - The screen is captured using GDI's BitBlt. A separate thread scans the screen every 0.033 seconds and passes any changes to OCR. Since it can detect changes even during OCR, old translations are quickly cleared.
-- With the screen sharing setting on, the window the region belongs to is read with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is.
-- "Sonoba for sharing" is a window holding DWM thumbnails of the original window and of the overlay on top of it. DWM draws it; Sonoba only matches its position and size every 0.05 seconds.
+- With the screen sharing setting on, the window the region belongs to is read with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is. Every 0.05 seconds the translations on screen are cut to the shape of the windows in front.
+- "Sonoba for sharing" is a window holding DWM thumbnails of the original window and of a copy of the overlay on top of it. The copy sits off the screen and is never cut or hidden from capture. DWM draws it; Sonoba only matches its position and size every 0.05 seconds.
 - OCR is executed on the CPU using PP-OCRv6 small via rten. The model is embedded in the exe. If the Korean model has been downloaded, only lines where reading confidence is low are also read using the PP-OCRv5 Korean model; if the text is in Hangul, that model is used instead. The number of threads is adjusted to match the number of performance cores on the PC. The ink within the detection frame is examined line by line to determine the character-only region, background color, text color, and boldness.
 - Translation is requested via HTTP by launching llama-server. Paragraphs are grouped into about 240 characters, one paragraph per line, sent four at a time, and displayed as each line is completed. The grouped paragraphs form the context, and the original text of the preceding group is also provided for reference.
 - Window movement is detected via WinEvent, and the translation is moved without performing OCR.

@@ -34,7 +34,7 @@ use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, O
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -76,6 +76,8 @@ const FLASH_TIMER: usize = 1;
 const FLASH_MS: u32 = 450;
 const PEEK_TIMER: usize = 2;
 const PEEK_MS: u32 = 30;
+const CLIP_TIMER: usize = 3;
+const CLIP_MS: u32 = 50; // windows brought in front of the one being read
 const CLIPBOARD_TRIES: usize = 25;
 const CLIPBOARD_WAIT: Duration = Duration::from_millis(20);
 const FRAME_PX: i32 = 2;
@@ -606,6 +608,8 @@ struct Ui {
     hover_window: Cell<HWND>,
     region: Cell<Region>,
     anchor: Cell<Option<Anchor>>,
+    parts_window: Cell<HWND>, // the one window all of several regions lie in, if they do
+    clip: Cell<HRGN>, // a copy of the overlay's region, where windows in front cut it
     hook: Cell<HWINEVENTHOOK>,
     job_id: Cell<u64>, // results from older jobs are dropped
     live: Cell<bool>,
@@ -631,6 +635,8 @@ thread_local! {
         hover_window: Cell::new(null_mut()),
         region: Cell::new(Region { x: 0, y: 0, w: 0, h: 0 }),
         anchor: Cell::new(None),
+        parts_window: Cell::new(null_mut()),
+        clip: Cell::new(null_mut()),
         hook: Cell::new(null_mut()),
         job_id: Cell::new(0),
         live: Cell::new(false),
@@ -667,6 +673,8 @@ fn stop() {
         ui.patches.borrow_mut().clear();
         ShowWindow(ui.overlay.get(), SW_HIDE);
         ShowWindow(ui.frame.get(), SW_HIDE);
+        KillTimer(ui.main.get(), CLIP_TIMER);
+        unclip(ui);
         if !ui.hook.get().is_null() {
             UnhookWinEvent(ui.hook.replace(null_mut()));
         }
@@ -898,10 +906,7 @@ unsafe fn window_at(select: HWND, at: POINT) -> Option<(HWND, RECT)> {
     unsafe {
         let mut hwnd = GetWindow(select, GW_HWNDNEXT);
         while !hwnd.is_null() {
-            let click_through = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT != 0;
-            let mut cloaked: u32 = 0;
-            DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut _ as *mut _, 4);
-            if IsWindowVisible(hwnd) != 0 && !click_through && cloaked == 0 {
+            if is_solid(hwnd) {
                 if let Some(bounds) = frame_bounds(hwnd).filter(|bounds| PtInRect(bounds, at) != 0) {
                     return Some((hwnd, bounds));
                 }
@@ -910,6 +915,34 @@ unsafe fn window_at(select: HWND, at: POINT) -> Option<(HWND, RECT)> {
         }
         None
     }
+}
+
+/// Shown and taking clicks: not a see-through layer over the screen. Game overlays such as NVIDIA's
+/// cover a whole monitor and let clicks through their clear pixels, without saying so in their style.
+unsafe fn is_solid(hwnd: HWND) -> bool {
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let mut cloaked: u32 = 0;
+        DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut _ as *mut _, 4);
+        if IsWindowVisible(hwnd) == 0 || style & WS_EX_TRANSPARENT != 0 || cloaked != 0 {
+            return false;
+        }
+        let layer = WS_EX_LAYERED | WS_EX_NOACTIVATE;
+        let Some(bounds) = frame_bounds(hwnd).filter(|_| style & layer == layer) else { return true };
+        let monitor = on_its_monitor(&bounds);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(MonitorFromRect(&bounds, MONITOR_DEFAULTTONEAREST), &mut info);
+        let area = |r: &RECT| (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+        area(&monitor) * 100 < area(&info.rcMonitor) * 95
+    }
+}
+
+/// The window a region lies wholly inside, if any.
+unsafe fn window_holding(select: HWND, r: Region) -> Option<HWND> {
+    let centre = POINT { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+    let inside = |b: &RECT| r.x >= b.left && r.y >= b.top && r.x + r.w <= b.right && r.y + r.h <= b.bottom;
+    unsafe { window_at(select, centre) }.filter(|(_, bounds)| inside(bounds)).map(|(window, _)| window)
 }
 
 /// A click with no drag selects the window under it, so that window gets a frame.
@@ -988,13 +1021,28 @@ unsafe fn finish_select(hwnd: HWND) {
                 }
             }
         }
-        end_select();
         let region = Region {
             x: rect.left + origin.x,
             y: rect.top + origin.y,
             w: rect.right - rect.left,
             h: rect.bottom - rect.top,
         };
+        // Several regions can still all lie in one window, which can then be read and shared.
+        let mut parts_window = null_mut();
+        if adding {
+            let mut regions: Vec<Region> = PARTS.lock().unwrap().iter().map(|p| p.region).collect();
+            if regions.is_empty() {
+                regions.push(ui.region.get());
+            }
+            regions.push(region);
+            let windows: Vec<Option<HWND>> = regions.into_iter().map(|r| window_holding(hwnd, r)).collect();
+            if let Some(&Some(first)) = windows.first() {
+                if windows.iter().all(|&w| w == Some(first)) {
+                    parts_window = first;
+                }
+            }
+        }
+        end_select();
         if adding {
             let mut parts = PARTS.lock().unwrap().clone();
             if parts.is_empty() {
@@ -1004,6 +1052,7 @@ unsafe fn finish_select(hwnd: HWND) {
             let around = around_all(&parts);
             *PARTS.lock().unwrap() = parts;
             ui.anchor.set(None);
+            ui.parts_window.set(parts_window);
             start_job(around, live);
         } else {
             PARTS.lock().unwrap().clear();
@@ -1048,12 +1097,20 @@ fn start_job(region: Region, live: bool) {
             let mut process = 0;
             let thread = GetWindowThreadProcessId(anchor.window, &mut process);
             ui.hook.set(SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, null_mut(), Some(on_location), process, thread, WINEVENT_OUTOFCONTEXT));
-            if config::get().shared {
-                share::follow(anchor.window, ui.overlay.get());
+        }
+        // The window to read, and to share. The desktop shows everything on it, so never that.
+        let window = anchor
+            .map(|a| a.window)
+            .or_else(|| (!parts.is_empty()).then(|| ui.parts_window.get()))
+            .filter(|&w| !w.is_null() && !is_desktop(w));
+        show_patches(vec![Patch::status(&t(WORKING), region.w)]);
+        set_job(Some(Job { region, live, id, window: window.map_or(0, |w| w as usize) }));
+        if config::get().shared {
+            share::follow(window, ui.overlay.get());
+            if window.is_some() {
+                SetTimer(ui.main.get(), CLIP_TIMER, CLIP_MS, None);
             }
         }
-        show_patches(vec![Patch::status(&t(WORKING), region.w)]);
-        set_job(Some(Job { region, live, id, window: anchor.map_or(0, |a| a.window as usize) }));
         update_frame();
     });
 }
@@ -1237,6 +1294,7 @@ fn show_patches(mut patches: Vec<Patch>) {
         let show = if PAUSED.load(Ordering::Relaxed) || ui.peeking.get() { 0 } else { SWP_SHOWWINDOW };
         SetWindowPos(overlay, HWND_TOPMOST, region.x, region.y, region.w, height, SWP_NOACTIVATE | show);
         InvalidateRect(overlay, null(), 0);
+        share::repaint();
     });
 }
 
@@ -1544,11 +1602,85 @@ pub fn app_icon(size: Option<i32>) -> HICON {
 
 /// The share window comes and goes with the setting, showing the window of the job running now.
 pub fn shared_changed() {
-    UI.with(|ui| match (config::get().shared, ui.anchor.get()) {
-        (false, _) => share::close(),
-        (true, Some(anchor)) if ui.job_id.get() != 0 => share::follow(anchor.window, ui.overlay.get()),
-        _ => {}
+    UI.with(|ui| unsafe {
+        if !config::get().shared {
+            share::close();
+            KillTimer(ui.main.get(), CLIP_TIMER);
+            unclip(ui);
+            return;
+        }
+        let window = JOB.lock().unwrap().map_or(0, |job| job.window) as HWND;
+        if ui.job_id.get() != 0 && !window.is_null() {
+            share::follow(Some(window), ui.overlay.get());
+            SetTimer(ui.main.get(), CLIP_TIMER, CLIP_MS, None);
+        }
     });
+}
+
+/// With sharing on, the window is read as it draws itself, whatever lies on top of it, so the
+/// translations would stay over windows brought in front. On screen they give way to those
+/// windows; the share window, with its own copy, still shows them all.
+fn clip_overlay() {
+    UI.with(|ui| unsafe {
+        let window = JOB.lock().unwrap().map_or(0, |job| job.window) as HWND;
+        if window.is_null() {
+            return unclip(ui);
+        }
+        let overlay = ui.overlay.get();
+        let mut at: RECT = std::mem::zeroed();
+        GetWindowRect(overlay, &mut at);
+        let visible = CreateRectRgn(0, 0, at.right - at.left, at.bottom - at.top);
+        let mut covered = false;
+        let mut above = GetWindow(window, GW_HWNDPREV);
+        while !above.is_null() {
+            let mut process = 0;
+            GetWindowThreadProcessId(above, &mut process);
+            let mut cut: RECT = std::mem::zeroed();
+            if process != GetCurrentProcessId()
+                && is_solid(above)
+                && frame_bounds(above).is_some_and(|bounds| IntersectRect(&mut cut, &bounds, &at) != 0)
+            {
+                let part = CreateRectRgn(cut.left - at.left, cut.top - at.top, cut.right - at.left, cut.bottom - at.top);
+                CombineRgn(visible, visible, part, RGN_DIFF);
+                DeleteObject(part);
+                covered = true;
+            }
+            above = GetWindow(above, GW_HWNDPREV);
+        }
+        if !covered {
+            DeleteObject(visible);
+            return unclip(ui);
+        }
+        let last = ui.clip.get();
+        if !last.is_null() && EqualRgn(last, visible) != 0 {
+            DeleteObject(visible);
+            return;
+        }
+        let copy = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(copy, visible, null_mut(), RGN_COPY);
+        if !last.is_null() {
+            DeleteObject(last);
+        }
+        ui.clip.set(copy);
+        SetWindowRgn(overlay, visible, 1); // the window owns the region from here
+    });
+}
+
+unsafe fn unclip(ui: &Ui) {
+    let last = ui.clip.replace(null_mut());
+    if !last.is_null() {
+        unsafe {
+            DeleteObject(last);
+            SetWindowRgn(ui.overlay.get(), null_mut(), 1);
+        }
+    }
+}
+
+/// The desktop behind every window: never a window to read or share, as it shows the whole screen.
+fn is_desktop(window: HWND) -> bool {
+    let mut name = [0u16; 16];
+    let n = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) } as usize;
+    matches!(String::from_utf16_lossy(&name[..n]).as_str(), "Progman" | "WorkerW")
 }
 
 /// The tray's text follows the language. The rest is written when next shown.
@@ -1603,6 +1735,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 KillTimer(hwnd, FLASH_TIMER);
                 UI.with(|ui| ui.flashing.set(false));
                 update_frame();
+                0
+            }
+            WM_TIMER if w == CLIP_TIMER => {
+                clip_overlay();
                 0
             }
             WM_DISPLAYCHANGE => {

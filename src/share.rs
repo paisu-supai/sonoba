@@ -1,9 +1,14 @@
 //! A window for sharing one window in Discord, Meet or OBS: the translated window as DWM draws it,
-//! with the overlay on top, both as thumbnails, so it costs next to nothing. The overlay is a
-//! window of its own, which a share of the original window leaves out. This one sits off every
+//! with the translations on top, both as thumbnails, so it costs next to nothing. A share of the
+//! original window leaves the overlay out, as it is a window of its own. This one sits off every
 //! screen, out of the way, and stays after a job so that a share does not end with it.
+//!
+//! The translations come from a copy of the overlay, also off screen: on screen the overlay gives
+//! way to windows in front and may hide from capture, while the share shows the window whole.
 
+use crate::config;
 use crate::i18n::t;
+use crate::patch::KEY_COLOR;
 use std::cell::Cell;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::*;
@@ -19,37 +24,67 @@ const TITLE: &str = "Sonoba 共有用";
 
 thread_local! {
     static WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
-    static TARGET: Cell<HWND> = const { Cell::new(null_mut()) };
+    static COPY: Cell<HWND> = const { Cell::new(null_mut()) }; // of the overlay
     static OVERLAY: Cell<HWND> = const { Cell::new(null_mut()) };
+    static TARGET: Cell<HWND> = const { Cell::new(null_mut()) };
+    static ACTIVE: Cell<bool> = const { Cell::new(false) }; // the job is about the target
     static THUMBS: Cell<(isize, isize)> = const { Cell::new((0, 0)) };
     static PLACED: Cell<[i32; 11]> = const { Cell::new([0; 11]) };
 }
 
-/// The share window shows `target` from now on, made the first time it is needed.
-pub fn follow(target: HWND, overlay: HWND) {
+/// The share window shows `target` with its translations, made the first time it is needed. None:
+/// the job has no window to share, and the share keeps the last one, without translations.
+pub fn follow(target: Option<HWND>, overlay: HWND) {
     unsafe {
+        ACTIVE.set(target.is_some());
+        OVERLAY.set(overlay);
+        let Some(target) = target else {
+            place();
+            return;
+        };
         let mut hwnd = WINDOW.get();
         if hwnd.is_null() {
-            hwnd = CreateWindowExW(WS_EX_APPWINDOW, w!("SonobaShare"), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), GetModuleHandleW(null()), null());
+            let module = GetModuleHandleW(null());
+            hwnd = CreateWindowExW(WS_EX_APPWINDOW, w!("SonobaShare"), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), module, null());
             WINDOW.set(hwnd);
+            let style = WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+            let copy = CreateWindowExW(style, w!("SonobaOverlay"), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), module, null());
+            COPY.set(copy);
+            repaint();
+            ShowWindow(copy, SW_SHOWNOACTIVATE);
             SetTimer(hwnd, TIMER, TIMER_MS, None);
         }
         let title: Vec<u16> = t(TITLE).encode_utf16().chain([0]).collect();
         SetWindowTextW(hwnd, title.as_ptr());
-        if TARGET.get() == target && OVERLAY.get() == overlay {
-            return;
+        if TARGET.get() != target {
+            unregister();
+            // The later thumbnail is drawn on top.
+            let (mut below, mut above) = (0, 0);
+            DwmRegisterThumbnail(hwnd, target, &mut below);
+            DwmRegisterThumbnail(hwnd, COPY.get(), &mut above);
+            THUMBS.set((below, above));
+            TARGET.set(target);
         }
-        unregister();
-        // The later thumbnail is drawn on top.
-        let (mut below, mut above) = (0, 0);
-        DwmRegisterThumbnail(hwnd, target, &mut below);
-        DwmRegisterThumbnail(hwnd, overlay, &mut above);
-        THUMBS.set((below, above));
-        TARGET.set(target);
-        OVERLAY.set(overlay);
         PLACED.set([0; 11]);
         place();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+/// The overlay has new translations, a new size or a new strength, and the copy follows.
+pub fn repaint() {
+    let copy = COPY.get();
+    if copy.is_null() {
+        return;
+    }
+    unsafe {
+        let mut over: RECT = std::mem::zeroed();
+        GetWindowRect(OVERLAY.get(), &mut over);
+        let alpha = (config::get().opacity as u32 * 255 / 100) as u8;
+        SetLayeredWindowAttributes(copy, KEY_COLOR, alpha, LWA_COLORKEY | LWA_ALPHA);
+        let (x, y) = off_screen();
+        SetWindowPos(copy, null_mut(), x, y, over.right - over.left, over.bottom - over.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(copy, null(), 0);
     }
 }
 
@@ -69,19 +104,26 @@ fn unregister() {
     TARGET.set(null_mut());
 }
 
-/// Size and thumbnails after the windows, and the position off every screen, which can change.
+/// Just past the right edge of all the screens, which can change.
+fn off_screen() -> (i32, i32) {
+    unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100, GetSystemMetrics(SM_YVIRTUALSCREEN)) }
+}
+
+/// Size and thumbnails after the windows.
 unsafe fn place() {
     unsafe {
         let (hwnd, target, overlay) = (WINDOW.get(), TARGET.get(), OVERLAY.get());
+        if hwnd.is_null() {
+            return;
+        }
         let Some(bounds) = crate::frame_bounds(target) else { return }; // gone, or for now not there
         let mut whole: RECT = std::mem::zeroed();
         GetWindowRect(target, &mut whole);
         let mut over: RECT = std::mem::zeroed();
         GetWindowRect(overlay, &mut over);
         let (w, h) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
-        let x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100;
-        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let shown = IsWindowVisible(overlay);
+        let (x, y) = off_screen();
+        let shown = (ACTIVE.get() && IsWindowVisible(overlay) != 0) as i32;
         let (sx, sy, ox, oy) = (bounds.left - whole.left, bounds.top - whole.top, over.left - bounds.left, over.top - bounds.top);
         let now = [x, y, w, h, sx, sy, ox, oy, over.right - over.left, over.bottom - over.top, shown];
         if PLACED.replace(now) == now {
@@ -120,6 +162,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             WM_SYSCOMMAND if w & 0xFFF0 == SC_MINIMIZE as usize => 0,
             WM_DESTROY => {
                 unregister();
+                DestroyWindow(COPY.replace(null_mut()));
                 WINDOW.set(null_mut());
                 0
             }
