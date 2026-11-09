@@ -292,7 +292,10 @@ fn on_message(text: &str) {
             crate::update_frame();
         }
         "flash_frame" => config::update(|c| c.flash_frame = flag),
-        "shared" => config::update(|c| c.shared = flag),
+        "shared" => {
+            config::update(|c| c.shared = flag);
+            crate::shared_changed();
+        }
         "autostart" => set_autostart(flag),
         "form" => config::update(|c| c.form = text_value),
         "glossary" => {

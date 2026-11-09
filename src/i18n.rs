@@ -48,6 +48,7 @@ const ENGLISH: &[(&str, &str)] = &[
     ("英語", "English"),
     ("中国語（簡体字）", "Chinese (Simplified)"),
     ("中国語（繁体字）", "Chinese (Traditional)"),
+    ("Sonoba 共有用", "Sonoba for sharing"),
 ];
 
 /// The message in the language of the interface. A known beginning is enough, for messages that

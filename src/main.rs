@@ -16,6 +16,7 @@ mod models;
 mod ocr;
 mod patch;
 mod settings;
+mod share;
 mod translate;
 
 use i18n::t;
@@ -1047,6 +1048,9 @@ fn start_job(region: Region, live: bool) {
             let mut process = 0;
             let thread = GetWindowThreadProcessId(anchor.window, &mut process);
             ui.hook.set(SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, null_mut(), Some(on_location), process, thread, WINEVENT_OUTOFCONTEXT));
+            if config::get().shared {
+                share::follow(anchor.window, ui.overlay.get());
+            }
         }
         show_patches(vec![Patch::status(&t(WORKING), region.w)]);
         set_job(Some(Job { region, live, id, window: anchor.map_or(0, |a| a.window as usize) }));
@@ -1538,6 +1542,15 @@ pub fn app_icon(size: Option<i32>) -> HICON {
     }
 }
 
+/// The share window comes and goes with the setting, showing the window of the job running now.
+pub fn shared_changed() {
+    UI.with(|ui| match (config::get().shared, ui.anchor.get()) {
+        (false, _) => share::close(),
+        (true, Some(anchor)) if ui.job_id.get() != 0 => share::follow(anchor.window, ui.overlay.get()),
+        _ => {}
+    });
+}
+
 /// The tray's text follows the language. The rest is written when next shown.
 pub fn language_changed() {
     UI.with(|ui| unsafe { tray_icon(ui.main.get(), NIM_MODIFY) });
@@ -1786,6 +1799,7 @@ fn main() {
         settings::register_class();
         bar::register_class();
         toast::register_class();
+        share::register_class();
         let overlay_handle = overlay as usize;
         std::thread::spawn(move || worker(overlay_handle));
         let hotkeys_ok = register_hotkeys();
