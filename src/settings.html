@@ -136,6 +136,9 @@ input[type=text]:focus-visible, input[type=search]:focus-visible { outline: 2px 
 #lic_agree_row { margin: 0 16px 12px; }
 #script_list .row, #script_add { border-top: 1px solid var(--line); }
 #script_add b { flex: none; }
+#script_add { flex-wrap: wrap; row-gap: 8px; } /* a long language name moves the list to its own line, not cut off */
+#script_add .pick { margin-left: auto; }
+#script_add select { max-width: none; }
 .pick { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .pick select { min-width: 0; }
 [hidden] { display: none !important; }
