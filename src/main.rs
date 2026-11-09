@@ -212,12 +212,12 @@ fn worker(overlay: usize) {
     }
 }
 
-/// Loads the OCR models, or reloads them if the thread setting has changed.
+/// Loads the OCR models, or reloads them if the thread setting or the downloaded scripts have changed.
 fn ensure_ocr(ocr_models: &mut Option<ocr::Ocr>) -> Result<(), String> {
     let threads = config::get().threads();
-    let korean = models::is_present(models::KOREAN_OCR).then(|| models::path(models::KOREAN_OCR));
-    if !ocr_models.as_ref().is_some_and(|m| m.matches(threads, korean.is_some())) {
-        *ocr_models = Some(ocr::Ocr::new(threads, korean.as_deref())?);
+    let others: Vec<_> = ocr::SCRIPTS.iter().map(|s| (s, models::path(&s.file()))).filter(|(_, path)| path.exists()).collect();
+    if !ocr_models.as_ref().is_some_and(|m| m.matches(threads, &others)) {
+        *ocr_models = Some(ocr::Ocr::new(threads, &others)?);
     }
     Ok(())
 }

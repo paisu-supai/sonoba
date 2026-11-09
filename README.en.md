@@ -10,7 +10,7 @@ This English version was translated from the Japanese README by PLaMo 3 Translat
 
 This is a tray app for Windows. It performs OCR on any area of the screen, replacing text with translations. You can choose from Japanese, easy Japanese, English, Korean, or Chinese as the target. Like Google Translate's image translation, it overlays the translation on top of the original text. All processing is completed entirely on your PC.
 
-**[Download Sonoba (zip)](https://github.com/paisu-supai/sonoba/releases/latest/download/sonoba.zip)** (for Windows 11, 64MB, always the latest version). Previous versions and changes are in [Releases](https://github.com/paisu-supai/sonoba/releases).
+**[Download Sonoba (zip)](https://github.com/paisu-supai/sonoba/releases/latest/download/sonoba.zip)** (for Windows 11, 72MB, always the latest version). Previous versions and changes are in [Releases](https://github.com/paisu-supai/sonoba/releases).
 
 Built with PLaMo.
 
@@ -68,7 +68,7 @@ Double-click the system tray icon to open Settings. The Settings screen is displ
 - Source and target: Same settings as the bar used to select the region
 - Style: Automatic, polite, plain. Auto matches the tone of the original. Only with PLaMo 3 Translate.
 - Glossary: A list of words for which you want a fixed translation. It is used only when the word appears in the original text.
-- Read Korean: Becomes available with an additional download
+- Languages to read: Korean comes installed. Russian, Arabic, Thai, Hindi, Tamil and Telugu become readable once chosen and downloaded. Each can be deleted
 - Translation model: Select, download, delete, load, unload
 - Execution Method: Automatic, GPU Only, CPU Only
 - GPU Memory Limit: When set to Automatic, select the maximum GPU memory used by the translation engine.
@@ -89,11 +89,22 @@ Launching the app again will open the settings for the running instance. If it c
 
 ## Supported Languages
 
-The system can read Latin-script languages (such as English, French, German, and Spanish), Chinese, and Japanese. For Korean, you can read the text by downloading the OCR model (13MB) from the settings, and it will automatically translate it just like other languages.
+The system can read Latin-script languages (such as English, French, German, and Spanish), Chinese, Japanese and Korean. The Korean OCR model (13MB) comes in the zip.
+
+The following languages become readable once their OCR model (8MB each) is downloaded under "Languages to read" in the settings, and are then translated automatically like the others.
+
+- Russian, Ukrainian, Bulgarian, Kazakh and others (Cyrillic)
+- Arabic, Persian, Urdu and others
+- Thai
+- Hindi, Marathi, Nepali and others (Devanagari)
+- Tamil
+- Telugu
+
+Small text (9pt) is misread more often. Hindi, Tamil and Telugu had some letters misread even at 15pt. Ukrainian is among the languages Hy-MT2 supports, but not among those PLaMo 3 Translate supports. Greek is left out, as neither translation model supports it.
 
 It does not touch characters written in the target language. For example, if the target is "easy Japanese," it translates only the foreign language into easy Japanese, leaving the Japanese text on the screen as is. If the source is set to "Japanese too," the Japanese text on the screen is also rewritten into easy Japanese. Easy Japanese is a specification not found in the model card (`ja(easy)`) and is used by the model template and the PFN CLI.
 
-When the target language is English, sentences containing only Latin characters are treated as English and are not translated. Russian, Arabic, and Thai cannot be translated because the OCR model cannot read them.
+When the target language is English, sentences containing only Latin characters are treated as English and are not translated.
 
 ## Model
 
@@ -147,7 +158,7 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 - The screen is captured using GDI's BitBlt. A separate thread scans the screen every 0.033 seconds and passes any changes to OCR. Since it can detect changes even during OCR, old translations are quickly cleared. With several regions, each is read on its own, and only the regions whose picture changed are read again.
 - With the screen sharing setting on, each region is read from its window with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is. Every 0.05 seconds the translations on screen are cut to the shape of the windows in front.
 - "Sonoba for sharing" is a window holding DWM thumbnails of the original window and of a copy of the overlay on top of it. The copy sits off the screen and is never cut or hidden from capture. Each region in the window gets its own thumbnail of just that part of the copy. DWM draws it; Sonoba only matches its position and size every 0.05 seconds.
-- OCR is executed on the CPU using PP-OCRv6 small via rten. The model is embedded in the exe. If the Korean model has been downloaded, only lines where reading confidence is low are also read using the PP-OCRv5 Korean model; if the text is in Hangul, that model is used instead. The number of threads is adjusted to match the number of performance cores on the PC. The ink within the detection frame is examined line by line to determine the character-only region, background color, text color, and boldness.
+- OCR is executed on the CPU using PP-OCRv6 small via rten. The model is embedded in the exe. When per-language models (PP-OCRv5) such as the Korean one are in `data\models`, only lines read with low confidence, and lines where far too few letters were read for their width, are also read with those models. If one of them reads letters of its own script, its reading is used. The models are tried starting from the language read last, stopping at a confident reading. For Arabic, the letters the model gives from left to right are put back in right-to-left order. The number of threads is adjusted to match the number of performance cores on the PC. The ink within the detection frame is examined line by line to determine the character-only region, background color, text color, and boldness.
 - Translation is requested via HTTP by launching llama-server. Paragraphs are grouped into about 240 characters, one paragraph per line, sent four at a time, and displayed as each line is completed. The grouped paragraphs form the context, and the original text of the preceding group is also provided for reference.
 - Window movement is detected via WinEvent, and the translation is moved without performing OCR.
 - The overlay is the frontmost window with a transparent color.
@@ -169,7 +180,7 @@ Rust (MSVC) is required.
 cargo build --release
 ```
 
-The app looks for the translation engine at `engine\llama-server.exe` next to the exe file; if it's not found, it uses the one bundled with Ollama. The following command creates the distribution zip. It retrieves and includes the official build (Vulkan version) of llama.cpp.
+The app looks for the translation engine at `engine\llama-server.exe` next to the exe file; if it's not found, it uses the one bundled with Ollama. The following command creates the distribution zip. It retrieves and includes the official build (Vulkan version) of llama.cpp, and puts the Korean OCR model (`models\korean_PP-OCRv5_mobile_rec.onnx`) in `data\models`.
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
@@ -179,6 +190,12 @@ To check the display without touching the screen, draw the translation on the im
 
 ```bash
 RENDER_IN=in.png RENDER_OUT=out.png cargo test render_picture -- --ignored --nocapture
+```
+
+The test of the per-language OCR models runs on a folder holding the models downloaded from the settings.
+
+```bash
+OCR_MODELS=data/models cargo test reads_the_scripts_that_come_as_downloads -- --ignored --nocapture
 ```
 
 ## License

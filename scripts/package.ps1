@@ -1,6 +1,6 @@
 # Builds dist/sonoba-<version>.zip: the app plus the official llama.cpp Vulkan engine,
-# with the Visual C++ runtime that engine needs and every license text.
-# The model is not in the package: users download it from the settings window.
+# with the Visual C++ runtime that engine needs, the Korean OCR model and every license text.
+# The translation model is not in the package: users download it from the settings window.
 $ErrorActionPreference = 'Stop'
 $tag = 'b12144'
 $asset = "llama-$tag-bin-win-vulkan-x64.zip"
@@ -17,8 +17,10 @@ cargo build --release --manifest-path "$root\Cargo.toml"
 if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$stage\engine", "$stage\data" | Out-Null
+New-Item -ItemType Directory -Force "$stage\engine", "$stage\data\models" | Out-Null
 Set-Content "$stage\data\README.txt" -Encoding utf8 -Value 'Settings and models live here. Delete the whole app folder to remove the app.'
+# Korean comes ready to read; the other scripts are a download in the settings window.
+Copy-Item "$root\models\korean_PP-OCRv5_mobile_rec.onnx" "$stage\data\models"
 $zip = "$dist\$asset"
 if (-not (Test-Path $zip)) {
     Invoke-WebRequest "https://github.com/ggml-org/llama.cpp/releases/download/$tag/$asset" -OutFile $zip

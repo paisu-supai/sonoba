@@ -36,9 +36,6 @@ const CATALOG: [Known; 6] = [
     known("Hy-MT2-1.8B-Q4_K_M.gguf", "tencent/Hy-MT2-1.8B-GGUF", "hymt", "1.8B 4bit", "standard", 1.1, Some(1.7), "apache"),
 ];
 const SOURCE: &str = "https://huggingface.co";
-pub const KOREAN_OCR: &str = "korean_PP-OCRv5_mobile_rec.onnx"; // saved beside the models
-const KOREAN_REPO: &str = "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx";
-const KOREAN_REMOTE: &str = "inference.onnx";
 
 pub const VERIFYING: i32 = 100;
 /// Percent while a download runs, then VERIFYING; -1 when there is none.
@@ -160,11 +157,13 @@ fn sha256(file: &PathBuf) -> Result<String, String> {
 }
 
 fn download(file: &str) -> Result<(), String> {
-    let (repo, remote) = if file == KOREAN_OCR {
-        (KOREAN_REPO.to_string(), KOREAN_REMOTE)
-    } else {
-        let repo = CATALOG.iter().find(|k| k.file == file).map(|k| k.repo).ok_or("このモデルはダウンロードできません")?;
-        (repo.to_string(), file)
+    // The OCR models for other scripts are saved beside the translation models.
+    let (repo, remote) = match crate::ocr::SCRIPTS.iter().find(|s| s.file() == file) {
+        Some(script) => (script.repo(), "inference.onnx"),
+        None => {
+            let repo = CATALOG.iter().find(|k| k.file == file).map(|k| k.repo).ok_or("このモデルはダウンロードできません")?;
+            (repo.to_string(), file)
+        }
     };
     let (total, hash) = expected(&repo, remote)?;
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;

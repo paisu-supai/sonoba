@@ -156,7 +156,10 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     while first_word.is_some() {
         let inked: Vec<usize> = cols.iter().copied().filter(|&col| (top..bottom).any(|row| is_ink(col, row))).collect();
         let tall = bottom - top;
-        let word_w = first.chars().count() * tall * 9 / 20;
+        // A Hangul syllable is about as wide as the line is tall, twice a Latin letter, and Korean
+        // puts spaces between words, so a first word of one syllable is common.
+        let letters: usize = first.chars().map(|c| if matches!(c, '\u{AC00}'..='\u{D7A3}') { 2 } else { 1 }).sum();
+        let word_w = letters * tall * 9 / 20;
         let is_word = |w: usize| first.chars().all(char::is_alphanumeric) && w * 2 >= word_w && w * 10 <= word_w * 17;
         let gap = inked.windows(2).position(|pair| (pair[1] - pair[0]) * 5 > tall * 3);
         let Some(i) = gap.filter(|&i| (inked[i] - inked[0]) * 2 <= tall * 3 && !is_word(inked[i] - inked[0] + 1)) else { break };
@@ -462,10 +465,12 @@ mod tests {
     #[test]
     fn words_are_not_icons() {
         let mut img = canvas(200, 40, WHITE);
-        paint(&mut img, 200, (10, 14, 22, 26), BLACK, 3); // "to", set apart as in monospace
+        paint(&mut img, 200, (10, 14, 22, 26), BLACK, 3); // "to" set apart as in monospace, or a Hangul syllable
         paint(&mut img, 200, (31, 14, 180, 26), BLACK, 3);
-        let g = glyphs(&img, 200, 40, (0, 0, 200, 40), Some("to")).unwrap();
-        assert_eq!((g.x, g.icon), (10, false));
+        for first in ["to", "이"] {
+            let g = glyphs(&img, 200, 40, (0, 0, 200, 40), Some(first)).unwrap();
+            assert_eq!((g.x, g.icon), (10, false), "{first}");
+        }
     }
 
     #[test]
