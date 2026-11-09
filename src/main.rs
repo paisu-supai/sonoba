@@ -110,6 +110,7 @@ struct Region {
 struct Part {
     region: Region,
     live: bool,
+    window: usize, // the window it lies inside, which sharing reads it from; 0 for none
 }
 
 #[derive(Clone, Copy)]
@@ -117,7 +118,7 @@ struct Job {
     region: Region,
     live: bool,
     id: u64,
-    window: usize, // the window the region belongs to, if any
+    window: usize, // the window the region belongs to, if any; for several regions, each has its own
 }
 
 /// How a region hangs on the window under it, so that it can go wherever the window goes.
@@ -432,17 +433,26 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
         let moving = MOVED_AT.lock().unwrap().is_some_and(|at| at.elapsed() < MOVE_SETTLE);
         let settled = last.is_empty() || job.live || shared.done.load(Ordering::Relaxed);
         if !moving && settled && !PAUSED.load(Ordering::Relaxed) {
-            // For screen sharing the window is read as it draws itself, which leaves the overlay out.
-            let own = (config::get().shared && current.window != 0).then_some(current.window as HWND);
-            let mut frame = match own.and_then(|window| grabber.grab_window(window, x, y)) {
-                Some(frame) => {
+            // For screen sharing each window is read as it draws itself, which leaves the overlay out.
+            let parts = PARTS.lock().unwrap().clone();
+            let from_windows = config::get().shared
+                && if parts.is_empty() {
+                    current.window != 0 && grabber.read_window(current.window as HWND, (x, y, w, h), (0, 0))
+                } else {
+                    parts.iter().all(|p| {
+                        let Region { x: px, y: py, w: pw, h: ph } = p.region;
+                        p.window != 0 && grabber.read_window(p.window as HWND, (px, py, pw, ph), (px - x, py - y))
+                    })
+                };
+            let mut frame = match from_windows {
+                true => {
                     if !shown {
                         unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_NONE) };
                         shown = true;
                     }
-                    frame
+                    grabber.pixels()
                 }
-                None => {
+                false => {
                     // A one-shot result stays visible to screenshots, so it leaves the capture only here.
                     let trick = !job.live && !last.is_empty();
                     if trick || shown {
@@ -456,7 +466,6 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
                     frame
                 }
             };
-            let parts = PARTS.lock().unwrap().clone();
             if !parts.is_empty() {
                 // The selection layer takes a moment to leave the screen, so the first looks count for nothing.
                 if started.elapsed() < SETTLE {
@@ -608,7 +617,6 @@ struct Ui {
     hover_window: Cell<HWND>,
     region: Cell<Region>,
     anchor: Cell<Option<Anchor>>,
-    parts_window: Cell<HWND>, // the one window all of several regions lie in, if they do
     clip: Cell<HRGN>, // a copy of the overlay's region, where windows in front cut it
     hook: Cell<HWINEVENTHOOK>,
     job_id: Cell<u64>, // results from older jobs are dropped
@@ -635,7 +643,6 @@ thread_local! {
         hover_window: Cell::new(null_mut()),
         region: Cell::new(Region { x: 0, y: 0, w: 0, h: 0 }),
         anchor: Cell::new(None),
-        parts_window: Cell::new(null_mut()),
         clip: Cell::new(null_mut()),
         hook: Cell::new(null_mut()),
         job_id: Cell::new(0),
@@ -1027,32 +1034,22 @@ unsafe fn finish_select(hwnd: HWND) {
             w: rect.right - rect.left,
             h: rect.bottom - rect.top,
         };
-        // Several regions can still all lie in one window, which can then be read and shared.
-        let mut parts_window = null_mut();
+        // Each of several regions is read from the window it lies in, when it lies in one.
+        let window_of = |r: Region| window_holding(hwnd, r).filter(|&w| !is_desktop(w)).map_or(0, |w| w as usize);
+        let mut parts = Vec::new();
         if adding {
-            let mut regions: Vec<Region> = PARTS.lock().unwrap().iter().map(|p| p.region).collect();
-            if regions.is_empty() {
-                regions.push(ui.region.get());
+            parts = PARTS.lock().unwrap().clone();
+            if parts.is_empty() {
+                let first = ui.region.get();
+                parts.push(Part { region: first, live: ui.live.get(), window: window_of(first) });
             }
-            regions.push(region);
-            let windows: Vec<Option<HWND>> = regions.into_iter().map(|r| window_holding(hwnd, r)).collect();
-            if let Some(&Some(first)) = windows.first() {
-                if windows.iter().all(|&w| w == Some(first)) {
-                    parts_window = first;
-                }
-            }
+            parts.push(Part { region, live, window: window_of(region) });
         }
         end_select();
         if adding {
-            let mut parts = PARTS.lock().unwrap().clone();
-            if parts.is_empty() {
-                parts.push(Part { region: ui.region.get(), live: ui.live.get() });
-            }
-            parts.push(Part { region, live });
             let around = around_all(&parts);
             *PARTS.lock().unwrap() = parts;
             ui.anchor.set(None);
-            ui.parts_window.set(parts_window);
             start_job(around, live);
         } else {
             PARTS.lock().unwrap().clear();
@@ -1099,18 +1096,10 @@ fn start_job(region: Region, live: bool) {
             ui.hook.set(SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, null_mut(), Some(on_location), process, thread, WINEVENT_OUTOFCONTEXT));
         }
         // The window to read, and to share. The desktop shows everything on it, so never that.
-        let window = anchor
-            .map(|a| a.window)
-            .or_else(|| (!parts.is_empty()).then(|| ui.parts_window.get()))
-            .filter(|&w| !w.is_null() && !is_desktop(w));
+        let window = anchor.map(|a| a.window).filter(|&w| parts.is_empty() && !is_desktop(w));
         show_patches(vec![Patch::status(&t(WORKING), region.w)]);
         set_job(Some(Job { region, live, id, window: window.map_or(0, |w| w as usize) }));
-        if config::get().shared {
-            share::follow(window, ui.overlay.get());
-            if window.is_some() {
-                SetTimer(ui.main.get(), CLIP_TIMER, CLIP_MS, None);
-            }
-        }
+        sources_changed(ui);
         update_frame();
     });
 }
@@ -1541,6 +1530,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARA
                     UI.with(|ui| {
                         ui.live.set(live);
                         InvalidateRect(ui.frame.get(), null(), 0);
+                        sources_changed(ui);
                     });
                 }
                 0
@@ -1600,21 +1590,50 @@ pub fn app_icon(size: Option<i32>) -> HICON {
     }
 }
 
-/// The share window comes and goes with the setting, showing the window of the job running now.
+/// The share windows come and go with the setting, showing the windows of the job running now.
 pub fn shared_changed() {
-    UI.with(|ui| unsafe {
-        if !config::get().shared {
+    UI.with(|ui| {
+        if config::get().shared {
+            sources_changed(ui);
+        } else {
             share::close();
-            KillTimer(ui.main.get(), CLIP_TIMER);
-            unclip(ui);
-            return;
-        }
-        let window = JOB.lock().unwrap().map_or(0, |job| job.window) as HWND;
-        if ui.job_id.get() != 0 && !window.is_null() {
-            share::follow(Some(window), ui.overlay.get());
-            SetTimer(ui.main.get(), CLIP_TIMER, CLIP_MS, None);
+            unsafe { KillTimer(ui.main.get(), CLIP_TIMER) };
+            unsafe { unclip(ui) };
         }
     });
+}
+
+/// The windows the job reads, each with the regions in it (none: the whole overlay). Empty when
+/// it reads the screen: one region across windows, or one of several regions in none.
+fn sources() -> Vec<(HWND, Vec<Region>)> {
+    let Some(job) = *JOB.lock().unwrap() else { return Vec::new() };
+    let parts = PARTS.lock().unwrap().clone();
+    if parts.is_empty() {
+        return if job.window == 0 { Vec::new() } else { vec![(job.window as HWND, Vec::new())] };
+    }
+    if parts.iter().any(|p| p.window == 0) {
+        return Vec::new();
+    }
+    let mut out: Vec<(HWND, Vec<Region>)> = Vec::new();
+    for part in parts {
+        match out.iter_mut().find(|(window, _)| *window == part.window as HWND) {
+            Some((_, regions)) => regions.push(part.region),
+            None => out.push((part.window as HWND, vec![part.region])),
+        }
+    }
+    out
+}
+
+/// A job started, or lost regions: the share windows and the clipping follow its windows.
+fn sources_changed(ui: &Ui) {
+    if !config::get().shared {
+        return;
+    }
+    let sources = sources();
+    share::show(&sources, ui.overlay.get());
+    if !sources.is_empty() && ui.job_id.get() != 0 {
+        unsafe { SetTimer(ui.main.get(), CLIP_TIMER, CLIP_MS, None) };
+    }
 }
 
 /// With sharing on, the window is read as it draws itself, whatever lies on top of it, so the
@@ -1622,31 +1641,39 @@ pub fn shared_changed() {
 /// windows; the share window, with its own copy, still shows them all.
 fn clip_overlay() {
     UI.with(|ui| unsafe {
-        let window = JOB.lock().unwrap().map_or(0, |job| job.window) as HWND;
-        if window.is_null() {
+        let sources = sources();
+        if sources.is_empty() {
             return unclip(ui);
         }
         let overlay = ui.overlay.get();
         let mut at: RECT = std::mem::zeroed();
         GetWindowRect(overlay, &mut at);
-        let visible = CreateRectRgn(0, 0, at.right - at.left, at.bottom - at.top);
-        let mut covered = false;
-        let mut above = GetWindow(window, GW_HWNDPREV);
-        while !above.is_null() {
-            let mut process = 0;
-            GetWindowThreadProcessId(above, &mut process);
-            let mut cut: RECT = std::mem::zeroed();
-            if process != GetCurrentProcessId()
-                && is_solid(above)
-                && frame_bounds(above).is_some_and(|bounds| IntersectRect(&mut cut, &bounds, &at) != 0)
-            {
-                let part = CreateRectRgn(cut.left - at.left, cut.top - at.top, cut.right - at.left, cut.bottom - at.top);
-                CombineRgn(visible, visible, part, RGN_DIFF);
-                DeleteObject(part);
-                covered = true;
+        let local = |r: &RECT| CreateRectRgn(r.left - at.left, r.top - at.top, r.right - at.left, r.bottom - at.top);
+        // What shows of each window read, together.
+        let visible = CreateRectRgn(0, 0, 0, 0);
+        for (window, _) in &sources {
+            let Some(bounds) = frame_bounds(*window) else { continue };
+            let shows = local(&bounds);
+            let mut above = GetWindow(*window, GW_HWNDPREV);
+            while !above.is_null() {
+                let mut process = 0;
+                GetWindowThreadProcessId(above, &mut process);
+                if process != GetCurrentProcessId() && is_solid(above) {
+                    if let Some(front) = frame_bounds(above) {
+                        let cut = local(&front);
+                        CombineRgn(shows, shows, cut, RGN_DIFF);
+                        DeleteObject(cut);
+                    }
+                }
+                above = GetWindow(above, GW_HWNDPREV);
             }
-            above = GetWindow(above, GW_HWNDPREV);
+            CombineRgn(visible, visible, shows, RGN_OR);
+            DeleteObject(shows);
         }
+        let whole = CreateRectRgn(0, 0, at.right - at.left, at.bottom - at.top);
+        CombineRgn(visible, visible, whole, RGN_AND);
+        let covered = EqualRgn(visible, whole) == 0;
+        DeleteObject(whole);
         if !covered {
             DeleteObject(visible);
             return unclip(ui);
@@ -1965,7 +1992,7 @@ mod tests {
         let (width, height) = (10usize, 4usize);
         let frame = vec![9u8; width * height * 4];
         let mut out = Vec::new();
-        let parts = [Part { region: Region { x: 102, y: 201, w: 2, h: 1 }, live: true }, Part { region: Region { x: 108, y: 203, w: 5, h: 5 }, live: false }];
+        let parts = [Part { region: Region { x: 102, y: 201, w: 2, h: 1 }, live: true, window: 0 }, Part { region: Region { x: 108, y: 203, w: 5, h: 5 }, live: false, window: 0 }];
         keep_parts(&frame, &mut out, width, (100, 200), &parts, &mut Vec::new());
         let kept: Vec<(usize, usize)> = (0..width * height).filter(|i| out[i * 4] == 9).map(|i| (i % width, i / width)).collect();
         assert_eq!(kept, [(2, 1), (3, 1), (8, 3), (9, 3)]);
@@ -1974,7 +2001,7 @@ mod tests {
     #[test]
     fn a_one_shot_region_holds_still_beside_a_live_one_until_its_page_changes() {
         let width = 40usize;
-        let region = |x, live| Part { region: Region { x, y: 0, w: 20, h: 4 }, live };
+        let region = |x, live| Part { region: Region { x, y: 0, w: 20, h: 4 }, live, window: 0 };
         let parts = [region(0, true), region(20, false)];
         let (mut out, mut still) = (Vec::new(), Vec::new());
         let mut frame = vec![1u8; width * 4 * 4];
@@ -1994,7 +2021,7 @@ mod tests {
 
     #[test]
     fn the_box_around_regions_holds_them_all() {
-        let part = |x, y, w, h| Part { region: Region { x, y, w, h }, live: false };
+        let part = |x, y, w, h| Part { region: Region { x, y, w, h }, live: false, window: 0 };
         let parts = [part(10, 50, 5, 5), part(-4, 60, 2, 2)];
         let b = around_all(&parts);
         assert_eq!((b.x, b.y, b.w, b.h), (-4, 50, 19, 12));

@@ -52,13 +52,14 @@ The selected region is linked to the window below it. Moving the window moves th
 
 The active window remains unchanged, as neither the selection nor the translation takes keyboard focus. Clicking or scrolling will move through the translation to reach the window below.
 
-To show translations in screen sharing and recordings, turn on "Show live translations in screen sharing and recordings" in the settings. When the region is inside one window, translations then appear when the whole screen is shared or recorded. Regions added with Shift appear too, as long as they all lie in the same window. To share a single window, pick "Sonoba for sharing" instead of the original window. It appears in the taskbar once a translation starts, and shows the original window with the translations over it. It sits off the screen, so it never gets in the way.
+To show translations in screen sharing and recordings, turn on "Show live translations in screen sharing and recordings" in the settings. When the region is inside one window, translations then appear when the whole screen is shared or recorded. Regions added with Shift appear too, as long as each lies inside one window. To share a single window, pick "Sonoba for sharing - program name" (for example "Sonoba for sharing - chrome") instead of the original window. It appears in the taskbar once a translation starts, and shows the original window with the translations over it. There is one for each window with a region in it, so a game and a comment viewer can be captured separately, each showing only the translations of its own regions. It sits off the screen, so it never gets in the way.
 
 - In Discord, picking this window shares no sound from the original app. To share the sound too, share the whole screen.
 - In OBS's Window Capture, set Capture Method to "Windows 10 (1903 and up)". BitBlt shows it black.
 - A minimized share window shows nothing. When the translation stops, it keeps showing the last translated window.
 - When another window is brought in front of the original, the translations on screen go behind it. "Sonoba for sharing" still shows them all.
-- For a region across several windows, or on the desktop, "Sonoba for sharing" keeps showing the previous window without translations. It never shows the desktop.
+- With two windows of the same program, the second name ends in (2).
+- A region across several windows, or on the desktop, is read from the screen as it is, so its translations appear in no share. If one of the regions added with Shift is like that, all of them are. "Sonoba for sharing" keeps showing the previous window without translations. It never shows the desktop.
 
 ## Settings
 
@@ -74,7 +75,7 @@ Double-click the system tray icon to open Settings. The Settings screen is displ
 - CPU Threads: When set to Auto, the number of performance cores is used. You can reduce this to your preferred number.
 - Hotkeys: Keys for each of the five operations. Each key can be reset or disabled.
 - Green border: Displays a thin line outside the translation region. For full-screen windows, it displays an inner line. You can also display a thick line for a brief moment when translation is complete. Both are disabled by default.
-- Screen sharing and recordings: Live translations also appear in Discord or Meet screen sharing and in OBS recordings. Works only when the region is inside one window. Also brings up "Sonoba for sharing" for sharing a single window. Disabled by default.
+- Screen sharing and recordings: Live translations also appear in Discord or Meet screen sharing and in OBS recordings. Works only when the region is inside one window. Also brings up "Sonoba for sharing - program name" for each window with a region in it, for sharing a single window. Disabled by default.
 - Translation font, bold, strength: Lowering the strength makes the original screen visible through.
 - History: A list of recent translations. Search and copy available. Stored only in memory and disappears when the app is closed. Can also be turned off.
 - Autostart: Starts when Windows boots. Disabled by default. When enabled, it writes the exe location under the name `Sonoba` to the registry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and upon signing in, it starts while remaining resident in the system tray. No administrator privileges are required; it only affects your own account. Turning this off removes this value. When using the folder where the zip file was extracted, this is the only value written outside the folder. If you move the folder, turn it off and then back on again.
@@ -144,8 +145,8 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 ## How It Works
 
 - The screen is captured using GDI's BitBlt. A separate thread scans the screen every 0.033 seconds and passes any changes to OCR. Since it can detect changes even during OCR, old translations are quickly cleared.
-- With the screen sharing setting on, the window the region belongs to is read with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is. Every 0.05 seconds the translations on screen are cut to the shape of the windows in front.
-- "Sonoba for sharing" is a window holding DWM thumbnails of the original window and of a copy of the overlay on top of it. The copy sits off the screen and is never cut or hidden from capture. DWM draws it; Sonoba only matches its position and size every 0.05 seconds.
+- With the screen sharing setting on, each region is read from its window with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is. Every 0.05 seconds the translations on screen are cut to the shape of the windows in front.
+- "Sonoba for sharing" is a window holding DWM thumbnails of the original window and of a copy of the overlay on top of it. The copy sits off the screen and is never cut or hidden from capture. Each region in the window gets its own thumbnail of just that part of the copy. DWM draws it; Sonoba only matches its position and size every 0.05 seconds.
 - OCR is executed on the CPU using PP-OCRv6 small via rten. The model is embedded in the exe. If the Korean model has been downloaded, only lines where reading confidence is low are also read using the PP-OCRv5 Korean model; if the text is in Hangul, that model is used instead. The number of threads is adjusted to match the number of performance cores on the PC. The ink within the detection frame is examined line by line to determine the character-only region, background color, text color, and boldness.
 - Translation is requested via HTTP by launching llama-server. Paragraphs are grouped into about 240 characters, one paragraph per line, sent four at a time, and displayed as each line is completed. The grouped paragraphs form the context, and the original text of the preceding group is also provided for reference.
 - Window movement is detected via WinEvent, and the translation is moved without performing OCR.
