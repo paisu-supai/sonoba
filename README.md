@@ -200,6 +200,6 @@ OCR_MODELS=data/models cargo test reads_the_scripts_that_come_as_downloads -- --
 
 このアプリのソースコードは MIT License です。同梱物とモデルのライセンスは [NOTICE.md](NOTICE.md) にまとめました。本文は `licenses` フォルダにあります。
 
-PLaMo 3 Translate は [PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja) で提供されていて、モデルはこのリポジトリにも配布物にも含みません。同意しないと、PLaMo 3 Translate のダウンロードも翻訳もできません。**会社で使うときは、[PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja)を読んでください。** 職場の PC で業務に使う場合も商業目的にあたり、ローカルで動くかどうかは関係ありません。直近の事業年度の売上（関係会社を含む）が 10 億円以下なら PFN の登録フォームの提出が必要で、10 億円を超えると別の契約が必要です。翻訳結果を公表するときは、PLaMo の生成物であることを明示してください。
+PLaMo 3 Translate は [PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja) で提供されていて、モデルはこのリポジトリにも配布物にも含みません。同意しないと、PLaMo 3 Translate のダウンロードも翻訳もできません。**会社で使うときは、[PLaMo コミュニティライセンス](https://plamo.preferredai.jp/info/plamo-community-license-ja)を読んでください。** 職場の PC で業務に使う場合も商業目的にあたり、ローカルで動くかどうかは関係ありません。直近の事業年度の売上（関係会社を含む）が 10 億円以下なら PFN の登録フォームの提出が必要で、10 億円を超えると別の契約が必要です。翻訳結果は、PLaMo の生成物だと明示しなくても公表できます（2026 年 11 月 9 日の改定から）。ただし、本や論文のような長い公表物の全部か大部分として公表するときは、奥付や謝辞などに、PLaMo で翻訳したことを書いてください。
 
 Hy-MT2 は Tencent が Apache License 2.0 で提供していて、モデルはこのリポジトリにも配布物にも含みません。同意の手続きは要らず、会社でも使えます。軽量は、unsloth が同じライセンスで公開している量子化版です。
