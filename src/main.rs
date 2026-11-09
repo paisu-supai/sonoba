@@ -34,7 +34,7 @@ use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, O
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
+use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -182,7 +182,11 @@ struct Shared {
     done: AtomicBool,     // the current frame's translation is on show
     shown: Mutex<(Vec<u8>, Vec<Patch>)>, // what is on show, and the pixels it was made from
     working: Mutex<(Vec<u8>, Vec<Patch>)>, // the same for the text being translated
+    read: Mutex<Vec<ReadPart>>, // of several regions, each as OCR last read it
 }
+
+/// A region, its picture when OCR last read it, and the lines read then.
+type ReadPart = (Region, Vec<u8>, Vec<ocr::Line>);
 
 fn worker(overlay: usize) {
     let mut models: Option<ocr::Ocr> = None;
@@ -248,6 +252,7 @@ fn new_shared() -> Shared {
         done: AtomicBool::new(false),
         shown: Mutex::new((Vec::new(), Vec::new())),
         working: Mutex::new((Vec::new(), Vec::new())),
+        read: Mutex::new(Vec::new()),
     }
 }
 
@@ -539,24 +544,48 @@ fn give_up_on_stale_work(frame: &[u8], width: usize, shared: &Shared) {
 /// OCR of a frame. Several regions are read one by one: the picture around regions far apart, a
 /// game on one screen and comments on another, is large, and OCR scales a large picture down
 /// until small text is lost.
-fn read_lines(ocr: &ocr::Ocr, frame: &[u8], w: usize, h: usize) -> Result<Vec<ocr::Line>, String> {
+fn read_lines(ocr: &ocr::Ocr, frame: &[u8], w: usize, h: usize, shared: &Shared) -> Result<Vec<ocr::Line>, String> {
     let parts = PARTS.lock().unwrap().clone();
     let Some(job) = (*JOB.lock().unwrap()).filter(|_| !parts.is_empty()) else { return ocr.read(frame, w, h) };
+    let mut last = shared.read.lock().unwrap();
+    read_parts(&parts, (job.region.x, job.region.y), (frame, w, h), &mut last, |pixels, pw, ph| ocr.read(pixels, pw, ph))
+}
+
+/// Each region read on its own, and only if its picture changed since it was last read: with a
+/// comment viewer scrolling on, the game's subtitle is not read again with every new comment.
+fn read_parts(
+    parts: &[Part],
+    (x, y): (i32, i32),
+    (frame, w, h): (&[u8], usize, usize),
+    last: &mut Vec<ReadPart>,
+    mut read: impl FnMut(&[u8], usize, usize) -> Result<Vec<ocr::Line>, String>,
+) -> Result<Vec<ocr::Line>, String> {
     let mut lines = Vec::new();
+    let mut now = Vec::new();
     for part in parts {
         let r = part.region;
         let span = |from: i32, length: i32, at: i32, limit: usize| ((from - at).clamp(0, limit as i32) as usize, (from + length - at).clamp(0, limit as i32) as usize);
-        let (left, right) = span(r.x, r.w, job.region.x, w);
-        let (top, bottom) = span(r.y, r.h, job.region.y, h);
+        let (left, right) = span(r.x, r.w, x, w);
+        let (top, bottom) = span(r.y, r.h, y, h);
         if right <= left || bottom <= top {
             continue;
         }
-        for mut line in ocr.read(&crop(frame, w, (left, top, right, bottom)), right - left, bottom - top)? {
-            line.glyphs.x += left as i32;
-            line.glyphs.y += top as i32;
-            lines.push(line);
-        }
+        let pixels = crop(frame, w, (left, top, right, bottom));
+        let found = match last.iter().position(|(region, before, _)| *region == r && *before == pixels) {
+            Some(index) => last.swap_remove(index).2,
+            None => {
+                let mut read = read(&pixels, right - left, bottom - top)?;
+                for line in &mut read {
+                    line.glyphs.x += left as i32;
+                    line.glyphs.y += top as i32;
+                }
+                read
+            }
+        };
+        lines.extend(found.iter().cloned());
+        now.push((r, pixels, found));
     }
+    *last = now;
     Ok(lines)
 }
 
@@ -579,7 +608,7 @@ fn translate_frame(
     let Frame { pixels, w, h } = frame;
     let (w, h) = (*w, *h);
     let frame = pixels.as_slice();
-    let lines = read_lines(models.as_ref().unwrap(), frame, w, h)?;
+    let lines = read_lines(models.as_ref().unwrap(), frame, w, h, shared)?;
     let blocks = ocr::paragraphs(&lines);
     let blocks: Vec<&ocr::Block> = blocks.iter().filter(|b| !ocr::looks_like_code(&b.text)).collect();
     let everything = blocks.iter().map(|block| Patch::new(frame, w, h, block, String::new())).collect();
@@ -1922,6 +1951,11 @@ fn main() {
     unsafe {
         CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32); // WebView2 asks for it
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Windows slows down a process with no window in the taskbar, as this one sits in the tray,
+        // and OCR took four times as long. It only ever works for what is on the screen.
+        let full_speed = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: 0 };
+        let size = size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &full_speed as *const _ as *const _, size);
         register_class(w!("SonobaMain"), Some(main_proc), IDC_ARROW);
         register_class(w!("SonobaSelect"), Some(select_proc), IDC_CROSS);
         register_class(w!("SonobaOverlay"), Some(overlay_proc), IDC_ARROW);
@@ -2013,6 +2047,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_regions_whose_picture_changed_are_read_again() {
+        use std::cell::Cell;
+        // Two regions side by side in a picture 4 wide and 1 high; the stand-in OCR reads one line each.
+        let part = |x| Part { region: Region { x, y: 0, w: 2, h: 1 }, live: true, window: 0 };
+        let parts = [part(10), part(12)];
+        let reads = Cell::new(0);
+        let read = |_: &[u8], _: usize, _: usize| {
+            reads.set(reads.get() + 1);
+            let glyphs = patch::Glyphs { x: 0, y: 0, w: 1, h: 1, bg: [0; 3], fg: [0; 3], stem: 1, icon: false, picture: false };
+            Ok(vec![ocr::Line { glyphs, text: String::new() }])
+        };
+        let mut frame = vec![0u8; 4 * 4];
+        let mut last = Vec::new();
+        let lines = read_parts(&parts, (10, 0), (&frame, 4, 1), &mut last, read).unwrap();
+        assert_eq!((reads.get(), lines.iter().map(|l| l.glyphs.x).collect::<Vec<_>>()), (2, vec![0, 2]));
+        read_parts(&parts, (10, 0), (&frame, 4, 1), &mut last, read).unwrap();
+        assert_eq!(reads.get(), 2, "nothing changed, nothing read");
+        frame[3 * 4] = 255; // a pixel of the second region
+        let lines = read_parts(&parts, (10, 0), (&frame, 4, 1), &mut last, read).unwrap();
+        assert_eq!((reads.get(), lines.len()), (3, 2), "only the second region read again, both still there");
+    }
 
     #[test]
     fn a_crop_takes_the_rows_and_columns_asked_for() {
