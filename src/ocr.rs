@@ -399,9 +399,14 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut prev: Option<&Line> = None;
     let mut em_sum = 0.0;
-    for line in lines {
+    for (i, line) in lines.iter().enumerate() {
         let (g, em) = (&line.glyphs, font_size(line.glyphs.h, &line.text));
-        match out.last_mut().filter(|b| prev.is_some_and(|a| continues(a, line, b.glyphs.x + b.glyphs.w))) {
+        // How far the lines around reach: a wrapped line nearly does, a chat message rarely.
+        let around = |a: &Line| {
+            let near = &lines[i.saturating_sub(3)..(i + 3).min(lines.len())];
+            near.iter().map(|n| &n.glyphs).filter(|n| (a.glyphs.h - n.h).abs() * 3 <= a.glyphs.h.max(n.h) && (a.glyphs.x + a.glyphs.w).min(n.x + n.w) > a.glyphs.x.max(n.x)).map(|n| n.x + n.w).max().unwrap_or(0)
+        };
+        match out.last_mut().filter(|b| prev.is_some_and(|a| continues(a, line, b.glyphs.x + b.glyphs.w, around(a)))) {
             Some(block) => {
                 let hyphen = block.text.ends_with('-') && line.text.starts_with(|c: char| c.is_lowercase());
                 if hyphen {
@@ -442,8 +447,9 @@ pub fn looks_like_code(text: &str) -> bool {
     symbols.saturating_sub(prose_brackets) * 12 >= text.chars().count()
 }
 
-/// True when `b` carries on the paragraph that `a` ended, wrapped by the layout.
-fn continues(line_a: &Line, line_b: &Line, para_right: i32) -> bool {
+/// True when `b` carries on the paragraph that `a` ended, wrapped by the layout. `around_right`
+/// is how far the lines near `a` in its column reach.
+fn continues(line_a: &Line, line_b: &Line, para_right: i32, around_right: i32) -> bool {
     let (a, b) = (&line_a.glyphs, &line_b.glyphs);
     let h = a.h.max(b.h);
     let gap = b.y - (a.y + a.h);
@@ -452,8 +458,14 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32) -> bool {
     if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !a.same_style(b) {
         return false;
     }
+    // A hard line break: b's first word would have fitted on a, so nothing forced a wrap.
+    let first_word = line_b.text.split(' ').next().unwrap_or("").chars().count() + 1;
+    let word_w = b.w * first_word as i32 / line_b.text.chars().count().max(1) as i32;
+    let wrapped = a.x + a.w + word_w > para_right.max(around_right).max(b.x + b.w);
+    // Lowercase carries a sentence on, unless the line before ended one or stopped short: chat
+    // messages often start with a lowercase name.
     if line_b.text.starts_with(|c: char| c.is_lowercase()) {
-        return true;
+        return wrapped && !line_a.text.trim_end().ends_with(['.', '!', '?', '。', '！', '？']);
     }
     // Japanese has no words to go by: a line that ran to the right edge was wrapped.
     if line_a.text.ends_with(is_cjk) && line_b.text.starts_with(is_cjk) {
@@ -462,10 +474,7 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32) -> bool {
     if line_a.text.split(' ').count() < 4 {
         return false; // menu items and labels, not wrapped prose
     }
-    // A hard line break: b's first word would have fitted on a, so nothing forced a wrap.
-    let first_word = line_b.text.split(' ').next().unwrap_or("").chars().count() + 1;
-    let word_w = b.w * first_word as i32 / line_b.text.chars().count().max(1) as i32;
-    a.x + a.w + word_w > para_right.max(b.x + b.w)
+    wrapped
 }
 
 #[cfg(test)]
@@ -517,6 +526,23 @@ mod tests {
         let mut code = l(0, 24, 300, "python");
         code.glyphs.bg = [35, 31, 27];
         assert_eq!(paragraphs(&[l(0, 0, 500, "pay more for the output."), code]).len(), 2);
+    }
+
+    #[test]
+    fn chat_messages_starting_with_a_lowercase_name_stay_apart() {
+        let chat = [
+            l(0, 0, 240, "kai_88 hello from Canada!"),
+            l(0, 30, 260, "eunbi 오늘도 방송 감사합니다"),
+            l(0, 60, 200, "ana this game looks amazing"),
+            l(0, 90, 350, "nova_k first time watching this game"),
+            l(0, 120, 180, "luis the music is so good"),
+        ];
+        // The widest one still looks wrapped onto the next; the rest are each their own.
+        let got: Vec<String> = paragraphs(&chat).into_iter().map(|b| b.text).collect();
+        assert_eq!(got.len(), 4, "{got:?}");
+        // Wrapped prose still joins, also where the next line is the widest.
+        let prose = [l(0, 0, 480, "the update changes how tasks are scheduled"), l(0, 24, 500, "and how long each of them may run before it stops,"), l(0, 48, 120, "every time.")];
+        assert_eq!(paragraphs(&prose).len(), 1);
     }
 
     #[test]
