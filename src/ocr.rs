@@ -5,13 +5,60 @@ use crate::patch::{self, Glyphs};
 use rayon::prelude::*;
 use rten::{Model, RunOptions, ThreadPool};
 use rten_tensor::NdTensor;
-use std::path::Path;
+use std::ops::RangeInclusive;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static DET: &[u8] = include_bytes!("../models/PP-OCRv6_det_small.onnx");
 static REC: &[u8] = include_bytes!("../models/PP-OCRv6_rec_small.onnx");
 static DICT: &str = include_str!("../models/dict.txt");
-static DICT_KOREAN: &str = include_str!("../models/dict_korean.txt");
+
+/// A script PP-OCRv6 has no letters for, and PaddleOCR's PP-OCRv5 model that reads it. Each
+/// comes as a download, and also reads English.
+pub struct Script {
+    pub id: &'static str, // PaddleOCR's name for the model, which names the file and the repository too
+    dict: &'static str,
+    letters: &'static [RangeInclusive<char>],
+    right_to_left: bool,
+}
+
+pub static SCRIPTS: [Script; 7] = [
+    Script { id: "korean", dict: include_str!("../models/dict_korean.txt"), letters: &['\u{AC00}'..='\u{D7A3}'], right_to_left: false },
+    Script { id: "cyrillic", dict: include_str!("../models/dict_cyrillic.txt"), letters: &['\u{0400}'..='\u{04FF}'], right_to_left: false },
+    Script {
+        id: "arabic",
+        dict: include_str!("../models/dict_arabic.txt"),
+        letters: &['\u{0600}'..='\u{06FF}', '\u{0750}'..='\u{077F}', '\u{FB50}'..='\u{FDFF}', '\u{FE70}'..='\u{FEFF}'],
+        right_to_left: true,
+    },
+    Script { id: "th", dict: include_str!("../models/dict_th.txt"), letters: &['\u{0E00}'..='\u{0E7F}'], right_to_left: false },
+    Script { id: "devanagari", dict: include_str!("../models/dict_devanagari.txt"), letters: &['\u{0900}'..='\u{097F}'], right_to_left: false },
+    Script { id: "ta", dict: include_str!("../models/dict_ta.txt"), letters: &['\u{0B80}'..='\u{0BFF}'], right_to_left: false },
+    Script { id: "te", dict: include_str!("../models/dict_te.txt"), letters: &['\u{0C00}'..='\u{0C7F}'], right_to_left: false },
+];
+
+impl Script {
+    pub fn file(&self) -> String {
+        format!("{}_PP-OCRv5_mobile_rec.onnx", self.id)
+    }
+
+    pub fn repo(&self) -> String {
+        format!("PaddlePaddle/{}_PP-OCRv5_mobile_rec_onnx", self.id)
+    }
+
+    fn has(&self, c: char) -> bool {
+        self.letters.iter().any(|r| r.contains(&c))
+    }
+
+    /// Whether this model's reading is text in its script, not a guess at some other script.
+    /// A sure reading may mix in English; a less sure one must be mostly the script.
+    fn wrote(&self, text: &str, score: f32) -> bool {
+        let ours = text.chars().filter(|&c| self.has(c)).count();
+        let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+        ours > 0 && (score >= OTHER_SCORE || (score >= TEXT_SCORE && ours * 2 >= letters))
+    }
+}
 
 // shortcut: long sides above this are scaled down, so a whole 4K screen of small text
 // reads poorly; tile the image if full-screen regions turn out to matter.
@@ -24,7 +71,8 @@ const REC_HEIGHT: usize = 48;
 const REC_MIN_WIDTH: usize = 160;
 const REC_MAX_WIDTH: usize = 3200;
 const TEXT_SCORE: f32 = 0.5;
-const SURE_SCORE: f32 = 0.93; // a line read this well is no Hangul, and needs no second look
+const SURE_SCORE: f32 = 0.93; // a line read this well is in a script PP-OCRv6 knows, and needs no second look
+const OTHER_SCORE: f32 = 0.8; // a reading by another script's model this sure is no guess, even if it is mostly English
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
@@ -93,7 +141,8 @@ pub struct Ocr {
     det: Model,
     rec: Model,
     chars: Vec<&'static str>,
-    korean: Option<(Model, Vec<&'static str>)>,
+    others: Vec<(&'static Script, Model, Vec<&'static str>)>,
+    last: AtomicUsize, // the one of `others` that read the last line it was asked to
     pool: Arc<ThreadPool>,
     threads: usize,
 }
@@ -106,23 +155,23 @@ fn dictionary(lines: &'static str) -> Vec<&'static str> {
 }
 
 impl Ocr {
-    /// PP-OCRv6 reads Chinese, English, Japanese and Latin scripts. Hangul takes a model of its
-    /// own, which comes as a download.
-    pub fn new(threads: usize, korean: Option<&Path>) -> Result<Self, String> {
+    /// PP-OCRv6 reads Chinese, English, Japanese and Latin scripts. `others` are the models for
+    /// the other scripts that have been downloaded.
+    pub fn new(threads: usize, others: &[(&'static Script, PathBuf)]) -> Result<Self, String> {
         let load = |b| Model::load_static_slice(b).map_err(|e| e.to_string());
-        let korean = match korean {
-            Some(path) => {
+        let others = others
+            .iter()
+            .map(|(script, path)| {
                 let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-                Some((Model::load(bytes).map_err(|e| e.to_string())?, dictionary(DICT_KOREAN)))
-            }
-            None => None,
-        };
+                Ok((*script, Model::load(bytes).map_err(|e| e.to_string())?, dictionary(script.dict)))
+            })
+            .collect::<Result<_, String>>()?;
         let pool = Arc::new(ThreadPool::with_num_threads(threads));
-        Ok(Self { det: load(DET)?, rec: load(REC)?, chars: dictionary(DICT), korean, pool, threads })
+        Ok(Self { det: load(DET)?, rec: load(REC)?, chars: dictionary(DICT), others, last: AtomicUsize::new(0), pool, threads })
     }
 
-    pub fn matches(&self, threads: usize, korean: bool) -> bool {
-        self.threads == threads && self.korean.is_some() == korean
+    pub fn matches(&self, threads: usize, others: &[(&'static Script, PathBuf)]) -> bool {
+        self.threads == threads && self.others.iter().map(|o| o.0.id).eq(others.iter().map(|o| o.0.id))
     }
 
     fn run_options(&self) -> Option<RunOptions> {
@@ -184,11 +233,27 @@ impl Ocr {
             return Ok(String::new());
         }
         let (text, score) = self.read_with(&self.rec, &self.chars, img, rect)?;
-        // Hangul reads badly in the main model, so doubt is what sends a line to the other one.
-        if let Some((model, chars)) = self.korean.as_ref().filter(|_| score < SURE_SCORE) {
-            let (hangul, hangul_score) = self.read_with(model, chars, img, rect)?;
-            if hangul_score > score && hangul.contains(is_hangul) {
-                return Ok(hangul);
+        // Other scripts read badly in the main model, so doubt is what sends a line to their
+        // models. It drops the letters it has no class for and can be sure of the full stop it
+        // keeps, so a reading far too short for the line is doubt too.
+        let too_short = text.chars().count() * bh * 2 < bw;
+        if score < SURE_SCORE || too_short {
+            // The script that won last goes first, as a screen tends to stay in one language.
+            let first = self.last.load(Ordering::Relaxed);
+            let (mut best, mut best_score) = (None, if too_short { 0.0 } else { score });
+            for i in (0..self.others.len()).map(|i| (i + first) % self.others.len()) {
+                let (script, model, chars) = &self.others[i];
+                let (other, other_score) = self.read_with(model, chars, img, rect)?;
+                if other_score > best_score && script.wrote(&other, other_score) {
+                    (best, best_score) = (Some((i, if script.right_to_left { logical_order(&other) } else { other })), other_score);
+                    if other_score >= SURE_SCORE {
+                        break;
+                    }
+                }
+            }
+            if let Some((i, other)) = best {
+                self.last.store(i, Ordering::Relaxed);
+                return Ok(other);
             }
         }
         Ok(if score < TEXT_SCORE { String::new() } else { text })
@@ -255,8 +320,21 @@ fn text_boxes(prob: &[f32], w: usize, h: usize) -> Vec<(f32, f32, f32, f32)> {
     boxes
 }
 
-fn is_hangul(c: char) -> bool {
-    matches!(c, '\u{AC00}'..='\u{D7A3}')
+/// The model reads Arabic as it sees it, left to right. Runs of Latin letters and digits keep
+/// their order and inner spaces, as in PaddleOCR's own decoder.
+fn logical_order(text: &str) -> String {
+    let ltr = |c: char| c.is_ascii_alphanumeric() || ":*./%+-".contains(c);
+    let mut runs: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let len = if ltr(c) { rest.find(|c: char| !ltr(c) && c != ' ').unwrap_or(rest.len()) } else { c.len_utf8() };
+        let run = rest[..len].trim_end_matches(' '); // a space after the run sits between it and the Arabic
+        runs.push(run);
+        runs.extend((run.len()..len).map(|_| " "));
+        rest = &rest[len..];
+    }
+    runs.reverse();
+    runs.concat()
 }
 
 /// The text, and how sure the model was of it.
@@ -502,7 +580,7 @@ mod tests {
     /// Boxes are taller than the glyphs, so a blank line looks smaller than a line height.
     #[test]
     fn blank_line_separates_paragraphs() {
-        let ocr = Ocr::new(4, None).unwrap();
+        let ocr = Ocr::new(4, &[]).unwrap();
         let (bgra, w, h) = png_bgra("testdata/paragraphs.png");
         let lines = ocr.read(&bgra, w, h).unwrap();
         let got = paragraphs(&lines);
@@ -512,7 +590,7 @@ mod tests {
 
     #[test]
     fn bold_is_recognised_at_heading_and_body_sizes() {
-        let ocr = Ocr::new(4, None).unwrap();
+        let ocr = Ocr::new(4, &[]).unwrap();
         let (bgra, w, h) = png_bgra("testdata/weights.png");
         let blocks = paragraphs(&ocr.read(&bgra, w, h).unwrap());
         let got: Vec<_> = blocks
@@ -534,7 +612,7 @@ mod tests {
     /// Video frames are noisy, and once brought the seam search down to a line of no height.
     #[test]
     fn noisy_frames_never_panic() {
-        let ocr = Ocr::new(4, None).unwrap();
+        let ocr = Ocr::new(4, &[]).unwrap();
         let (clean, w, h) = png_bgra("testdata/paragraphs.png");
         let mut seed = 0x2545F4914F6CDD1Du64;
         let mut next = move || {
@@ -569,7 +647,7 @@ mod tests {
         const WANT: &str = "The quick update changes how background tasks are scheduled. If your session expires, \
             you'll need to sign in again before saving. Don't close this window until the upload has finished, \
             otherwise the file may be incomplete.";
-        let ocr = Ocr::new(4, None).unwrap();
+        let ocr = Ocr::new(4, &[]).unwrap();
         for name in ["dark-14px", "game-22px", "mono-13px", "ui-12px", "ui-14px", "web-16px"] {
             let (bgra, w, h) = png_bgra(&format!("testdata/{name}.png"));
             let start = std::time::Instant::now();
@@ -591,7 +669,7 @@ mod tests {
     }
 
     fn with_korean() -> Ocr {
-        Ocr::new(4, Some(Path::new("models/korean_PP-OCRv5_mobile_rec.onnx"))).unwrap()
+        Ocr::new(4, &[(&SCRIPTS[0], PathBuf::from("models").join(SCRIPTS[0].file()))]).unwrap()
     }
 
     #[test]
@@ -602,11 +680,11 @@ mod tests {
             let got = paragraphs(&ocr.read(&bgra, w, h).unwrap()).iter().map(|b| b.text.clone()).collect::<Vec<_>>().join(" / ");
             println!("{name}: {got}");
             assert!(got.contains(want), "{name}: {got}");
-            assert!(!got.contains(is_hangul), "{name}: {got}");
+            assert!(!got.chars().any(|c| SCRIPTS[0].has(c)), "{name}: {got}");
         }
         let (bgra, w, h) = png_bgra("testdata/ui-14px.png");
         let got = paragraphs(&ocr.read(&bgra, w, h).unwrap()).iter().map(|b| b.text.clone()).collect::<Vec<_>>().join(" ");
-        assert!(!got.contains(is_hangul), "{got}");
+        assert!(!got.chars().any(|c| SCRIPTS[0].has(c)), "{got}");
     }
 
     #[test]
@@ -614,5 +692,56 @@ mod tests {
         let line = |y: i32, text: &str| Line { glyphs: Glyphs { x: 0, y, w: 400, h: 20, bg: [255; 3], fg: [0; 3], stem: 2, icon: false, picture: false }, text: text.to_string() };
         let blocks = paragraphs(&[line(0, "取扱説明書をよく読んで、"), line(26, "正しく使ってください。")]);
         assert_eq!(blocks[0].text, "取扱説明書をよく読んで、正しく使ってください。");
+    }
+
+    #[test]
+    fn arabic_is_put_back_in_reading_order() {
+        assert_eq!(logical_order("2026 ابحرم"), "مرحبا 2026");
+        assert_eq!(logical_order("ابت hello world مالس"), "سلام hello world تبا");
+    }
+
+    fn script(id: &str) -> &'static Script {
+        SCRIPTS.iter().find(|s| s.id == id).unwrap()
+    }
+
+    /// Guesses as these models made them at a test image in a script they cannot read.
+    #[test]
+    fn another_script_wins_only_with_its_own_letters() {
+        assert!(script("cyrillic").wrote("Язык можно изменить", 0.6));
+        assert!(!script("cyrillic").wrote("Mnopeite va alξEtE tn", 0.95));
+        assert!(!script("th").wrote("0| ETEe ๒ 2XM ษๆอ.", 0.6));
+        assert!(script("korean").wrote("Windows 설정", 0.95));
+        assert!(!script("korean").wrote("Windows 설정", 0.6));
+    }
+
+    fn text_of(ocr: &Ocr, name: &str) -> String {
+        let (bgra, w, h) = png_bgra(&format!("testdata/{name}.png"));
+        paragraphs(&ocr.read(&bgra, w, h).unwrap()).iter().map(|b| b.text.clone()).collect::<Vec<_>>().join(" / ")
+    }
+
+    /// Needs every script's model in the folder OCR_MODELS names, as the settings window saves them.
+    #[test]
+    #[ignore]
+    fn reads_the_scripts_that_come_as_downloads() {
+        let dir = PathBuf::from(std::env::var("OCR_MODELS").expect("OCR_MODELS"));
+        let all: Vec<_> = SCRIPTS.iter().map(|s| (s, if s.id == "korean" { PathBuf::from("models") } else { dir.clone() }.join(s.file()))).collect();
+        let ocr = Ocr::new(4, &all).unwrap();
+        for (name, want) in [
+            ("russian", "Эта программа переводит текст на экране. Язык можно изменить в настройках."),
+            ("arabic", "هذا البرنامج يترجم النص على الشاشة"),
+            ("thai", "โปรแกรมนี้แปลข้อความบนหน้าจอ / คุณสามารถเปลี่ยนภาษาได้ในการตั้งค่า"),
+            ("hindi", "का अनुवाद करता है।"),
+            ("tamil", "அமைப்புகளில் மொழியை மாற்றலாம்."),
+            ("telugu", "తెరపై ఉన్న వచనాన్ని అనువదిస్తుంది."),
+            ("korean", "화면의 글자를 번역합니다"),
+            ("mixed-en", "Please read the manual before you start the machine."),
+            ("mixed-ja", "使う前に取扱説明書をよく読んでください。"),
+            ("mixed-zh", "使用前请仔细阅读说明书。"),
+        ] {
+            let got = text_of(&ocr, name);
+            println!("{name}: {got}");
+            assert!(got.contains(want), "{name}: {got}");
+        }
+        assert_eq!(text_of(&ocr, "ui-14px"), text_of(&Ocr::new(4, &[]).unwrap(), "ui-14px"));
     }
 }

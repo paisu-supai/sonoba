@@ -134,6 +134,10 @@ input[type=text]:focus-visible, input[type=search]:focus-visible { outline: 2px 
 .agree { display: flex; gap: 9px; align-items: center; padding: 11px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); cursor: pointer; }
 .agree input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
 #lic_agree_row { margin: 0 16px 12px; }
+#script_list .row, #script_add { border-top: 1px solid var(--line); }
+#script_add b { flex: none; }
+.pick { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.pick select { min-width: 0; }
 [hidden] { display: none !important; }
 kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); white-space: nowrap; }
 </style>
@@ -161,9 +165,12 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
     </div>
     <p class="hint" data-t="easy_note"></p>
     <div class="card">
-      <div class="row"><div><b data-t="korean"></b><small id="korean_status"></small></div>
-        <span><button class="btn" id="korean_delete" data-t="delete"></button> <button class="btn main" id="korean_download"></button></span></div>
-      <div class="bar" id="korean_bar"><i></i></div>
+      <div class="row"><div><b data-t="scripts"></b><small data-t="scripts_note"></small></div></div>
+      <div id="script_list"></div>
+      <div class="row" id="script_add"><b data-t="script_add"></b>
+        <span class="pick"><select id="script_pick"></select><button class="btn main" id="script_download"></button></span></div>
+      <div class="bar" id="script_bar"><i></i></div>
+      <div class="status" id="script_status"></div>
     </div>
     <div class="card">
       <div class="row"><div><b data-t="glossary"></b><small data-t="glossary_note"></small></div><button class="btn" id="term_add" data-t="term_add"></button></div>
@@ -323,7 +330,10 @@ const TEXT = {
     nav_translate: '翻訳', nav_model: 'モデル', nav_keys: 'ホットキー', nav_look: '表示', nav_run: '動作', nav_about: '情報',
     source: '翻訳元', source_note: '読み取る文字の種類です', target: '翻訳先',
     src_auto: '自動（翻訳先の言語には触らない）', src_ja: '日本語も翻訳する',
-    korean: '韓国語を読み取る', ko_none: '追加のダウンロードが必要です（13MB）。入れると、ほかの言語と同じように自動で翻訳します', ko_on: '入っています。ハングルも自動で翻訳します', ko_part: '途中までダウンロードしてあります（続きから再開できます）',
+    scripts: '読み取る言語', scripts_note: '英語、フランス語、中国語、日本語などは最初から読めます。ほかの文字の言語は、ここで入れると読み取って自動で翻訳します',
+    script_add: '言語を追加', sc_on: '入っています',
+    sc_korean: '韓国語', sc_cyrillic: 'ロシア語、ウクライナ語など（キリル文字）', sc_arabic: 'アラビア語、ペルシャ語など', sc_th: 'タイ語',
+    sc_devanagari: 'ヒンディー語など（デーヴァナーガリー）', sc_ta: 'タミル語', sc_te: 'テルグ語',
     tgt_ja: '日本語', tgt_easy: 'やさしい日本語', tgt_en: '英語', tgt_ko: '韓国語', tgt_hans: '中国語（簡体字）', tgt_hant: '中国語（繁体字）',
     easy_note: '翻訳先を「やさしい日本語」にすると、外国語をやさしい日本語に訳します。画面の日本語もやさしくしたいときは、翻訳元を「日本語も翻訳する」にします。範囲を選ぶときの上のバーでも切り替えられます。',
     model: '翻訳モデル', download: 'ダウンロード', cancel: '中止', delete: '削除', load: '読み込む', unload: 'アンロード',
@@ -370,7 +380,10 @@ const TEXT = {
     nav_translate: 'Translation', nav_model: 'Model', nav_keys: 'Hotkeys', nav_look: 'Appearance', nav_run: 'System', nav_about: 'About',
     source: 'Translate from', source_note: 'The kind of text to read', target: 'Translate into',
     src_auto: 'Automatic (leave the target language alone)', src_ja: 'Japanese too',
-    korean: 'Read Korean', ko_none: 'Needs a small download (13 MB). After that, Korean is translated automatically like the other languages', ko_on: 'Installed. Korean is translated automatically', ko_part: 'Partly downloaded (it can resume)',
+    scripts: 'Languages to read', scripts_note: 'English, French, Chinese, Japanese and the like are read from the start. Languages in other scripts are read and translated automatically once added here',
+    script_add: 'Add a language', sc_on: 'Installed',
+    sc_korean: 'Korean', sc_cyrillic: 'Russian, Ukrainian and others (Cyrillic)', sc_arabic: 'Arabic, Persian and others', sc_th: 'Thai',
+    sc_devanagari: 'Hindi and others (Devanagari)', sc_ta: 'Tamil', sc_te: 'Telugu',
     tgt_ja: 'Japanese', tgt_easy: 'Easy Japanese', tgt_en: 'English', tgt_ko: 'Korean', tgt_hans: 'Chinese (Simplified)', tgt_hant: 'Chinese (Traditional)',
     easy_note: 'Easy Japanese turns foreign text into plain Japanese. To simplify the Japanese on screen as well, set the source to "Japanese too". The bar shown while selecting a region switches these too.',
     model: 'Translation model', download: 'Download', cancel: 'Cancel', delete: 'Delete', load: 'Load', unload: 'Unload',
@@ -424,6 +437,39 @@ const $ = id => document.getElementById(id);
 const post = m => chrome.webview.postMessage(m);
 let state = null, page = 'translate', waiting = -1, step = 0, introOpen = false, pending = null, trail = [];
 const T = key => TEXT[state?.ui_lang === 'en' ? 'en' : 'ja'][key] ?? key;
+
+// The OCR models for scripts PP-OCRv6 cannot read: what is in, and a list to add the rest from.
+function renderScripts(s, downloading, packDown) {
+  const kept = s.scripts.filter(x => x.present || x.partial);
+  const list = $('script_list');
+  const drawn = JSON.stringify([s.ui_lang, kept, packDown]);
+  if (list.dataset.drawn !== drawn) {
+    list.dataset.drawn = drawn;
+    list.replaceChildren(...kept.map(x => {
+      const row = document.createElement('div'), info = document.createElement('div');
+      const name = document.createElement('b'), note = document.createElement('small'), drop = document.createElement('button');
+      row.className = 'row';
+      name.textContent = T('sc_' + x.id);
+      note.textContent = T(x.present ? 'sc_on' : 'st_part');
+      drop.className = 'btn';
+      drop.textContent = T('delete');
+      drop.disabled = packDown;
+      drop.onclick = () => send('script_delete', x.id);
+      info.append(name, note);
+      row.append(info, drop);
+      return row;
+    }));
+  }
+  const left = s.scripts.filter(x => !x.present), pick = $('script_pick'), was = pick.value;
+  options(pick, left.map(x => [x.id, T('sc_' + x.id) + ' (' + (x.id === 'korean' ? 13 : 8) + ' MB)']), left.some(x => x.id === was) ? was : left[0]?.id ?? '');
+  pick.disabled = downloading;
+  $('script_add').hidden = !left.length;
+  $('script_status').textContent = packDown ? (s.progress === 100 ? T('st_verify') : T('st_down') + ' ' + s.progress + '%') : '';
+  $('script_status').hidden = !packDown;
+  $('script_download').textContent = T(packDown ? 'cancel' : 'download');
+  $('script_download').disabled = (downloading && !packDown) || s.progress === 100;
+  bar($('script_bar'), packDown ? s : { progress: -1 });
+}
 
 function options(select, list, value) {
   const wanted = list.map(o => o[0] + '\u0000' + o[1]).join('\u0001');
@@ -543,15 +589,10 @@ function render(s) {
   }
   const m = s.models.find(x => x.file === s.model) ?? {};
   const downloading = s.progress >= 0;
-  const packDown = downloading && s.downloading.startsWith('korean');
+  const packDown = downloading && s.scripts.some(x => s.downloading.startsWith(x.id + '_'));
   $('status').textContent = packDown ? T(m.present ? 'st_idle' : 'st_none') : statusOf(s);
   bar($('bar'), packDown ? { progress: -1 } : s);
-  bar($('korean_bar'), packDown ? s : { progress: -1 });
-  $('korean_status').textContent = packDown ? (s.progress === 100 ? T('st_verify') : T('st_down') + ' ' + s.progress + '%') : T(s.korean.present ? 'ko_on' : s.korean.partial ? 'ko_part' : 'ko_none');
-  $('korean_download').textContent = T(packDown ? 'cancel' : 'download');
-  $('korean_download').hidden = s.korean.present;
-  $('korean_download').disabled = (downloading && !packDown) || s.progress === 100;
-  $('korean_delete').hidden = !(s.korean.present || s.korean.partial) || packDown;
+  renderScripts(s, downloading, packDown);
   $('download').textContent = T(downloading ? 'cancel' : 'download');
   $('download').disabled = packDown || !((downloading && s.progress !== 100) || (!downloading && !m.present && m.download && !needsLicense(s, m)));
   renderPicker(s, $('families'), $('sizes'), $('model_info'), false);
@@ -654,8 +695,7 @@ $('delete').onclick = () => {
   const m = state.models.find(x => x.file === state.model);
   ask(T('ask_delete'), m.file + ' ' + T('ask_delete_q') + '\n' + T(m.download ? 'del_again' : 'del_gone'), T('del_yes'), () => send('delete'));
 };
-$('korean_download').onclick = () => send(state.progress >= 0 ? 'cancel' : 'korean_download');
-$('korean_delete').onclick = () => send('korean_delete');
+$('script_download').onclick = () => send(state.progress >= 0 ? 'cancel' : 'script_download', $('script_pick').value);
 $('load').onclick = () => send('load');
 $('unload').onclick = () => send('unload');
 for (const a of [$('license'), $('lic_open')]) a.onclick = () => send('open', LICENSE[state.ui_lang] ?? LICENSE.ja);

@@ -163,7 +163,7 @@ fn state() -> Value {
         "model": config.model,
         "progress": models::PROGRESS.load(Ordering::Relaxed),
         "downloading": models::DOWNLOADING.lock().unwrap().clone(),
-        "korean": { "present": models::is_present(models::KOREAN_OCR), "partial": models::has_part(models::KOREAN_OCR) },
+        "scripts": crate::ocr::SCRIPTS.iter().map(|s| json!({ "id": s.id, "present": models::is_present(&s.file()), "partial": models::has_part(&s.file()) })).collect::<Vec<_>>(),
         "engine": engine_state,
         "message": MESSAGE.with_borrow(Clone::clone),
         "device": device,
@@ -340,9 +340,13 @@ fn on_message(text: &str) {
         },
         // The PLaMo licence binds whoever uses a PLaMo model, so the page has them accept it first.
         "download" if !models::needs_license(&config::get().model) || config::get().license_accepted => models::start_download(config::get().model),
-        "korean_download" => models::start_download(models::KOREAN_OCR.to_string()),
-        "korean_delete" => {
-            if let Err(e) = models::delete(models::KOREAN_OCR) {
+        "script_download" => {
+            if let Some(script) = crate::ocr::SCRIPTS.iter().find(|s| s.id == text_value) {
+                models::start_download(script.file());
+            }
+        }
+        "script_delete" => {
+            if let Some(Err(e)) = crate::ocr::SCRIPTS.iter().find(|s| s.id == text_value).map(|s| models::delete(&s.file())) {
                 MESSAGE.set(format!("{}{e}", t("削除できません: ")));
             }
         }
