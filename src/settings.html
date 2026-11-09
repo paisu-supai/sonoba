@@ -44,6 +44,7 @@ h1 { font-size: 20px; font-weight: 650; margin: 0 0 16px; }
 .row > div:first-child { min-width: 0; }
 .row b { font-weight: 550; display: block; }
 .row small, .hint { color: var(--soft); font-size: 12.5px; display: block; }
+.row > a { white-space: nowrap; }
 .hint { margin: -4px 2px 14px; line-height: 1.6; }
 select, .key {
   font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--line); border-radius: 7px;
@@ -245,9 +246,10 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
   <section id="about">
     <h1 data-t="nav_about"></h1>
     <div class="card">
-      <div class="row"><div><b>Sonoba</b><small id="version"></small></div></div>
+      <div class="row"><div><b>Sonoba</b><small id="version"></small><small data-t="app_license"></small></div></div>
       <div class="row"><div><b>Built with PLaMo</b><small data-t="license_note"></small></div><a id="license" data-t="license_link"></a></div>
-      <div class="row"><div><b data-t="work_use"></b><small data-t="work_note"></small></div><a id="work_license" data-t="license_link"></a></div>
+      <div class="row"><div><b>Hy-MT2</b><small data-t="apache_about"></small></div><a id="apache_license" data-t="license_link"></a></div>
+      <div class="row"><div><b data-t="fam_other"></b><small data-t="lic_unknown"></small></div></div>
       <div class="row"><div><b data-t="folder"></b><small id="folder" style="user-select:text;word-break:break-all"></small></div></div>
     </div>
   </section>
@@ -302,6 +304,7 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
         <kbd id="how2"></kbd><span data-t="how_clear"></span>
       </div>
       <p data-t="how_bar"></p>
+      <p data-t="how_share"></p>
       <div class="foot"><span class="steps">4 / 4</span>
         <span><button class="btn" data-back data-t="prev"></button> <button class="btn main" id="intro_done" data-t="start"></button></span></div>
     </div>
@@ -336,12 +339,12 @@ const TEXT = {
     glossary: '用語集', glossary_note: '決まった訳にしたい言葉を登録します。原文にその言葉があるときだけ使います', term_add: '追加', term_from: '原文の言葉', term_to: '訳語',
     font: '訳文のフォント', font_default: '標準（Yu Gothic UI）', bold_text: '訳文を太字にする', bold_note: 'オフのときは元の文字に合わせます', opacity: '訳文の濃さ', opacity_note: '下げると元の画面が透けて見えます',
     nav_history: '履歴', keep_history: '履歴を残す', keep_note: 'アプリを終了すると消えます。ファイルには保存しません', clear: 'すべて消す', find: '履歴を検索', history_empty: 'まだ履歴はありません', history_note: 'クリックすると訳文をコピーします。', copied: 'コピーしました',
-    work_use: '会社で使うとき', work_note: '業務での利用は商業目的にあたり、PFN への登録などが必要です。ライセンスを確認してください',
     show_frame: '翻訳している範囲に緑の枠線を表示する', show_frame_note: '選んだ範囲かウィンドウの外側に細い線を出します', flash_frame: '翻訳が終わったら枠線を一瞬表示する',
     shared: '画面共有と録画にリアルタイムの訳文も映す', shared_note: 'Discord や Meet の画面共有と OBS の録画に映ります。範囲が 1 つのウィンドウの中にあるときだけです。ウィンドウを選んで共有するときは「Sonoba 共有用 - プログラム名」を選びます',
     device: '実行方法', dev_auto: '自動（GPU に載る分を GPU で）', dev_gpu: 'GPU のみ', dev_cpu: 'CPU のみ', gpu_limit: 'GPU メモリ上限', no_limit: '制限なし', threads: 'CPU スレッド数', auto: '自動',
     autostart: 'Windows の起動時に開始する', autostart_note: 'アプリのフォルダを移動したら入れ直してください', ui_lang: '表示の言語',
-    license_note: 'PLaMo コミュニティライセンスで提供されています', license_link: 'ライセンスを読む', folder: '設定とモデルの保存先',
+    license_note: '翻訳モデルの PLaMo 3 Translate は、PLaMo コミュニティライセンスで提供されています。使うには同意が必要で、会社の業務で使うには PFN への登録などが必要です', license_link: 'ライセンスを読む',
+    app_license: 'アプリ本体は MIT License です', apache_about: 'Tencent が Apache License 2.0 で提供しています。同意の手続きは要らず、会社でも使えます', folder: '設定とモデルの保存先',
     hello: 'ようこそ', hello_note: '画面の文字を、その場で訳文に置き換えます。翻訳はこの PC の中で完結します。表示の言語を選んでください。',
     next: '次へ', pick_model: '翻訳モデルを選ぶ', pick_model_note: 'あとから変えられます。迷ったら、このまま PLaMo 3 Translate の標準で進んでください。',
     fam_plamo: 'PFN のモデル。使うにはライセンスへの同意が必要です', fam_hymt: 'Tencent のモデル。同意の手続きは要りません', fam_other: 'その他のファイル',
@@ -359,7 +362,8 @@ const TEXT = {
     lic_free: '同意の手続きは要りません。会社でも使えます', lic_unknown: 'ファイルの配布元のライセンスに従ってください',
     apache_note: 'Hy-MT2 は Tencent が Apache License 2.0 で提供しています。同意の手続きは要らず、会社でも使えます。',
     how: '使い方', how_note: 'キーを押して、翻訳したい範囲をドラッグします。クリックするとウィンドウ全体を選びます。',
-    how_once: '範囲を 1 回翻訳', how_live: '画面が変わるたびに翻訳', how_clear: '訳文を消す', how_bar: '範囲を選ぶときに画面の上にバーが出て、言語とリアルタイムを切り替えられます。', start: 'はじめる',
+    how_once: '範囲を 1 回翻訳', how_live: '画面が変わるたびに翻訳', how_clear: '訳文を消す', how_bar: '範囲を選ぶときに画面の上にバーが出て、言語とリアルタイムを切り替えられます。',
+    how_share: '配信の OBS や会議アプリの画面共有に訳文を映したいときは、設定の「表示」で「画面共有と録画にリアルタイムの訳文も映す」をオンにしてください。', start: 'はじめる',
     back: 'やめる', ask_delete: 'モデルの削除', del_again: 'もう一度使うには、ダウンロードし直す必要があります。', del_gone: 'このファイルはごみ箱に入らず、元に戻せません。', del_yes: '削除する', ask_delete_q: 'を削除しますか？'
   },
   en: {
@@ -382,12 +386,12 @@ const TEXT = {
     glossary: 'Glossary', glossary_note: 'Words that must get a fixed translation. Used only when the original contains them', term_add: 'Add', term_from: 'Word in the original', term_to: 'Translation',
     font: 'Translation font', font_default: 'Default (Yu Gothic UI)', bold_text: 'Always bold', bold_note: 'Off follows the original text', opacity: 'Strength', opacity_note: 'Lower lets the screen show through',
     nav_history: 'History', keep_history: 'Keep a history', keep_note: 'Gone when the app exits. Nothing is saved to a file', clear: 'Clear all', find: 'Search the history', history_empty: 'Nothing here yet', history_note: 'Click an entry to copy its translation.', copied: 'Copied',
-    work_use: 'Using it at work', work_note: 'Business use counts as commercial and needs registering with PFN, or a contract. Check the license',
     show_frame: 'Show a green frame around the region', show_frame_note: 'A thin line just outside the region or window', flash_frame: 'Flash the frame when a translation finishes',
     shared: 'Show live translations in screen sharing and recordings', shared_note: 'They appear in Discord or Meet screen sharing and in OBS recordings, when the region is inside one window. To share one window, pick "Sonoba for sharing - program name"',
     device: 'Run on', dev_auto: 'Automatic (GPU for what fits)', dev_gpu: 'GPU only', dev_cpu: 'CPU only', gpu_limit: 'GPU memory limit', no_limit: 'No limit', threads: 'CPU threads', auto: 'Automatic',
     autostart: 'Start with Windows', autostart_note: 'Turn this on again after moving the app folder', ui_lang: 'Language',
-    license_note: 'Provided under the PLaMo Community License', license_link: 'Read the license', folder: 'Settings and models are stored in',
+    license_note: 'The translation model PLaMo 3 Translate is provided under the PLaMo Community License. Using it needs your agreement, and business use needs registering with PFN, among other things', license_link: 'Read the license',
+    app_license: 'The app itself is under the MIT License', apache_about: 'Provided by Tencent under the Apache License 2.0. No agreement is needed, and it can be used at work', folder: 'Settings and models are stored in',
     hello: 'Welcome', hello_note: 'Replaces the text on your screen with its translation, right where it is. Translation stays on this PC. Choose your language.',
     next: 'Next', pick_model: 'Choose a translation model', pick_model_note: 'You can change it later. If unsure, go on with PLaMo 3 Translate Standard.',
     fam_plamo: 'By PFN. Using it needs agreeing to its license', fam_hymt: 'By Tencent. No agreement needed', fam_other: 'Other files',
@@ -405,7 +409,8 @@ const TEXT = {
     lic_free: 'No agreement needed. It can be used at work', lic_unknown: 'Follow the license of where the file came from',
     apache_note: 'Hy-MT2 is provided by Tencent under the Apache License 2.0. No agreement is needed, and it can be used at work.',
     how: 'How to use it', how_note: 'Press the keys, then drag over the area to translate. A click selects a whole window.',
-    how_once: 'Translate a region once', how_live: 'Translate whenever the screen changes', how_clear: 'Clear the translation', how_bar: 'A bar at the top of the screen, shown while selecting, switches languages and live mode.', start: 'Get started',
+    how_once: 'Translate a region once', how_live: 'Translate whenever the screen changes', how_clear: 'Clear the translation', how_bar: 'A bar at the top of the screen, shown while selecting, switches languages and live mode.',
+    how_share: 'To show translations in an OBS stream or a meeting app\'s screen share, turn on "Show live translations in screen sharing and recordings" under Appearance in the settings.', start: 'Get started',
     back: 'Cancel', ask_delete: 'Delete model', del_again: 'To use it again you will need to download it again.', del_gone: 'This file skips the Recycle Bin and cannot be restored.', del_yes: 'Delete', ask_delete_q: ': delete this file?'
   }
 };
@@ -653,7 +658,8 @@ $('korean_download').onclick = () => send(state.progress >= 0 ? 'cancel' : 'kore
 $('korean_delete').onclick = () => send('korean_delete');
 $('load').onclick = () => send('load');
 $('unload').onclick = () => send('unload');
-for (const a of [$('license'), $('lic_open'), $('work_license')]) a.onclick = () => send('open', LICENSE[state.ui_lang] ?? LICENSE.ja);
+for (const a of [$('license'), $('lic_open')]) a.onclick = () => send('open', LICENSE[state.ui_lang] ?? LICENSE.ja);
+$('apache_license').onclick = () => send('open', APACHE);
 for (const a of [$('lic_link'), $('lic_open2')]) a.onclick = () => send('open', licenseUrl(state, state.models.find(x => x.file === state.model) ?? {}));
 $('lic_agree_model').onchange = e => { if (e.target.checked) send('license_accept'); };
 function choosing(index) {
