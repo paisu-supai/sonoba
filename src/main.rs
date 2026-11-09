@@ -183,6 +183,7 @@ struct Shared {
     shown: Mutex<(Vec<u8>, Vec<Patch>)>, // what is on show, and the pixels it was made from
     working: Mutex<(Vec<u8>, Vec<Patch>)>, // the same for the text being translated
     read: Mutex<Vec<ReadPart>>, // of several regions, each as OCR last read it
+    latest: Mutex<Vec<u8>>, // the newest picture, for work that finishes after the text has moved on
 }
 
 /// A region, its picture when OCR last read it, and the lines read then.
@@ -253,6 +254,7 @@ fn new_shared() -> Shared {
         shown: Mutex::new((Vec::new(), Vec::new())),
         working: Mutex::new((Vec::new(), Vec::new())),
         read: Mutex::new(Vec::new()),
+        latest: Mutex::new(Vec::new()),
     }
 }
 
@@ -291,9 +293,16 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
         let start = Instant::now();
         // Not "has the screen changed": behind a subtitle, a video changes it all the time.
         let keep_going = || is_current(job.id) && !shared.obsolete.load(Ordering::Relaxed);
-        let result = translate_frame(&frame, job.live, models, translator, &keep_going, &post, shared);
+        // Lines that moved on while being translated, as a chat's do, go up where they are now.
+        let post_now = |mut patches: Vec<Patch>| {
+            catch_up(&frame.pixels, &mut patches, frame.w, shared);
+            post(patches)
+        };
+        let result = translate_frame(&frame, job.live, models, translator, &keep_going, &post_now, shared);
         let mut patches = result.unwrap_or_else(|e| vec![Patch::status(&format!("エラー: {e}"), frame.w as i32)]);
         if keep_going() {
+            let pixels = catch_up(&frame.pixels, &mut patches, frame.w, shared).unwrap_or(frame.pixels);
+            let frame = Frame { pixels, w: frame.w, h: frame.h };
             let mut shown = shared.shown.lock().unwrap();
             hold_still(&mut patches, &shown, &frame);
             let changed = patches != shown.1;
@@ -493,6 +502,7 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
                     }
                     last.clear();
                     last.extend_from_slice(frame);
+                    shared.latest.lock().unwrap().clone_from(&last);
                     *shared.frame.lock().unwrap() = Some(Frame { pixels: last.clone(), w: w as usize, h: h as usize });
                     shared.fresh.notify_one();
                 } else if changed_pixels(frame, &last) * 100 > last.len() / 4 * STALE_PERCENT {
@@ -523,22 +533,88 @@ fn drop_stale_patches(frame: &[u8], width: usize, shared: &Shared, post: &impl F
     if basis.len() != frame.len() {
         return;
     }
-    let before = patches.len();
-    patches.retain(|p| !p.is_stale(frame, basis, width));
-    if patches.len() != before {
-        post(patches.clone());
+    let stale: Vec<bool> = patches.iter().map(|p| p.is_stale(frame, basis, width)).collect();
+    if !stale.contains(&true) {
+        return;
     }
+    // Text that has only moved, as a chat's lines do for a new one, takes its translation along.
+    let moves = scrolls(basis, frame, width);
+    let mut followed = false;
+    let kept: Vec<Patch> = patches
+        .drain(..)
+        .zip(stale)
+        .filter_map(|(p, stale)| {
+            if !stale {
+                return Some(p);
+            }
+            let dy = scrolled(&moves, &p, frame, basis, width)?;
+            followed = true;
+            Some(p.shifted(dy))
+        })
+        .collect();
+    *patches = kept;
+    if followed {
+        *basis = frame.to_vec(); // the text is where it now is
+    }
+    post(patches.clone());
 }
 
-/// Translating a page that has gone would only paint its text over the next one.
+/// Translating a page that has gone would only paint its text over the next one. Text that has
+/// only moved is still worth finishing: it goes up where it has moved to.
 fn give_up_on_stale_work(frame: &[u8], width: usize, shared: &Shared) {
     let (basis, patches) = &*shared.working.lock().unwrap();
     if basis.len() == frame.len() {
-        let stale = patches.iter().filter(|p| p.is_stale(frame, basis, width)).count();
+        let gone: Vec<&Patch> = patches.iter().filter(|p| p.is_stale(frame, basis, width)).collect();
+        let moves = if gone.is_empty() { Vec::new() } else { scrolls(basis, frame, width) };
+        let stale = gone.iter().filter(|p| scrolled(&moves, p, frame, basis, width).is_none()).count();
         if stale * 2 > patches.len() {
             shared.obsolete.store(true, Ordering::Relaxed);
         }
     }
+}
+
+type Rect = (usize, usize, usize, usize); // left, top, right, bottom
+
+/// Each region's part of the picture whose content has scrolled since `basis`, and how far.
+fn scrolls(basis: &[u8], frame: &[u8], width: usize) -> Vec<(Rect, i32)> {
+    let height = frame.len() / 4 / width.max(1);
+    let parts = PARTS.lock().unwrap().clone();
+    let origin = JOB.lock().unwrap().map(|job| (job.region.x, job.region.y));
+    let rects: Vec<Rect> = match origin.filter(|_| !parts.is_empty()) {
+        None => vec![(0, 0, width, height)],
+        Some((x, y)) => {
+            let at = |v: i32, limit: usize| v.clamp(0, limit as i32) as usize;
+            parts.iter().map(|p| (at(p.region.x - x, width), at(p.region.y - y, height), at(p.region.x + p.region.w - x, width), at(p.region.y + p.region.h - y, height))).collect()
+        }
+    };
+    rects.into_iter().filter_map(|rect| patch::scroll(basis, frame, width, rect).map(|dy| (rect, dy))).collect()
+}
+
+/// How far a patch's text has scrolled with the part it is in, if it is found there.
+fn scrolled(moves: &[(Rect, i32)], p: &Patch, frame: &[u8], basis: &[u8], width: usize) -> Option<i32> {
+    let (cx, cy) = ((p.x + p.w / 2).max(0) as usize, (p.y + p.h / 2).max(0) as usize);
+    let inside = |&&((left, top, right, bottom), _): &&(Rect, i32)| (left..right).contains(&cx) && (top..bottom).contains(&cy);
+    moves.iter().find(inside).map(|&(_, dy)| dy).filter(|&dy| p.moved(frame, basis, width, dy))
+}
+
+/// Brings patches made from `pixels` up to the newest picture, if the screen has moved on since:
+/// text that scrolled moves with it, text that has gone comes off. Returns that picture.
+fn catch_up(pixels: &[u8], patches: &mut Vec<Patch>, width: usize, shared: &Shared) -> Option<Vec<u8>> {
+    let latest = shared.latest.lock().unwrap().clone();
+    if latest.len() != pixels.len() || latest == pixels {
+        return None;
+    }
+    let moves = scrolls(pixels, &latest, width);
+    *patches = std::mem::take(patches)
+        .into_iter()
+        .filter_map(|p| {
+            if p.source.is_empty() || !p.is_stale(&latest, pixels, width) {
+                return Some(p);
+            }
+            scrolled(&moves, &p, &latest, pixels, width).map(|dy| p.shifted(dy))
+        })
+        .collect();
+    Some(latest)
 }
 
 /// OCR of a frame. Several regions are read one by one: the picture around regions far apart, a
