@@ -175,6 +175,7 @@ fn state() -> Value {
         "default_hotkeys": config::Config::default().hotkeys.iter().map(|h| json!({ "mods": h.mods, "key": h.key })).collect::<Vec<_>>(),
         "show_frame": config.show_frame,
         "flash_frame": config.flash_frame,
+        "shared": config.shared,
         "source": config.source,
         "target": config.target,
         "ui_lang": config.ui_lang,
@@ -291,6 +292,7 @@ fn on_message(text: &str) {
             crate::update_frame();
         }
         "flash_frame" => config::update(|c| c.flash_frame = flag),
+        "shared" => config::update(|c| c.shared = flag),
         "autostart" => set_autostart(flag),
         "form" => config::update(|c| c.form = text_value),
         "glossary" => {

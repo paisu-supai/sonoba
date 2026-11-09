@@ -66,6 +66,7 @@ Double-click the system tray icon to open Settings. The Settings screen is displ
 - CPU Threads: When set to Auto, the number of performance cores is used. You can reduce this to your preferred number.
 - Hotkeys: Keys for each of the five operations. Each key can be reset or disabled.
 - Green border: Displays a thin line outside the translation region. For full-screen windows, it displays an inner line. You can also display a thick line for a brief moment when translation is complete. Both are disabled by default.
+- Screen sharing and recordings: Live translations also appear in Discord or Meet screen sharing and in OBS recordings. Works only when the region is inside one window. Disabled by default.
 - Translation font, bold, strength: Lowering the strength makes the original screen visible through.
 - History: A list of recent translations. Search and copy available. Stored only in memory and disappears when the app is closed. Can also be turned off.
 - Autostart: Starts when Windows boots. Disabled by default. When enabled, it writes the exe location under the name `Sonoba` to the registry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and upon signing in, it starts while remaining resident in the system tray. No administrator privileges are required; it only affects your own account. Turning this off removes this value. When using the folder where the zip file was extracted, this is the only value written outside the folder. If you move the folder, turn it off and then back on again.
@@ -135,6 +136,7 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 ## How It Works
 
 - The screen is captured using GDI's BitBlt. A separate thread scans the screen every 0.033 seconds and passes any changes to OCR. Since it can detect changes even during OCR, old translations are quickly cleared.
+- With the screen sharing setting on, the window the region belongs to is read with PrintWindow. That leaves the overlay out of what OCR reads, so the translations no longer need hiding from recordings. A window lying on top of the region is not read; the text of the window underneath is.
 - OCR is executed on the CPU using PP-OCRv6 small via rten. The model is embedded in the exe. If the Korean model has been downloaded, only lines where reading confidence is low are also read using the PP-OCRv5 Korean model; if the text is in Hangul, that model is used instead. The number of threads is adjusted to match the number of performance cores on the PC. The ink within the detection frame is examined line by line to determine the character-only region, background color, text color, and boldness.
 - Translation is requested via HTTP by launching llama-server. Paragraphs are grouped into about 240 characters, one paragraph per line, sent four at a time, and displayed as each line is completed. The grouped paragraphs form the context, and the original text of the preceding group is also provided for reference.
 - Window movement is detected via WinEvent, and the translation is moved without performing OCR.
@@ -142,7 +144,7 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 
 ## Limits
 
-- Live translations will not appear in screenshots or recordings. This is to prevent OCR from reading its own translations. One-shot translations will appear, though they may occasionally fail to do so. When multiple regions are selected, the one-shot translation region will also not appear.
+- By default, live translations will not appear in screenshots or recordings. This is to prevent OCR from reading its own translations. With "Show live translations in screen sharing and recordings" turned on in the settings, they do appear when the region is inside one window. One-shot translations will appear, though they may occasionally fail to do so. When multiple regions are selected, the one-shot translation region will also not appear.
 - In live mode, text over photos or gradients is covered by a solid-colored square.
 - Vertically written and rotated text cannot be read.
 - Regions where the long side exceeds 1,600 pixels are scaled down before being read, making small characters harder to read. When there are multiple regions, the size is calculated by enclosing all of them, so distant regions are treated the same.

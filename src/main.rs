@@ -404,6 +404,7 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
     let mut last: Vec<u8> = Vec::new();
     let mut parted: Vec<u8> = Vec::new();
     let mut still: Vec<(Region, Vec<u8>)> = Vec::new();
+    let mut shown = false; // the overlay is in what screen capture sees
     let started = Instant::now();
     while let Some(current) = current_job(job.id) {
         let Region { x, y, w, h } = current.region;
@@ -428,15 +429,30 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
         let moving = MOVED_AT.lock().unwrap().is_some_and(|at| at.elapsed() < MOVE_SETTLE);
         let settled = last.is_empty() || job.live || shared.done.load(Ordering::Relaxed);
         if !moving && settled && !PAUSED.load(Ordering::Relaxed) {
-            // A one-shot result stays visible to screenshots, so it leaves the capture only here.
-            let trick = !job.live && !last.is_empty();
-            if trick {
-                unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_EXCLUDEFROMCAPTURE) };
-            }
-            let mut frame = grabber.grab(x, y);
-            if trick {
-                unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_NONE) };
-            }
+            // For screen sharing the window is read as it draws itself, which leaves the overlay out.
+            let own = (config::get().shared && current.window != 0).then_some(current.window as HWND);
+            let mut frame = match own.and_then(|window| grabber.grab_window(window, x, y)) {
+                Some(frame) => {
+                    if !shown {
+                        unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_NONE) };
+                        shown = true;
+                    }
+                    frame
+                }
+                None => {
+                    // A one-shot result stays visible to screenshots, so it leaves the capture only here.
+                    let trick = !job.live && !last.is_empty();
+                    if trick || shown {
+                        unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_EXCLUDEFROMCAPTURE) };
+                    }
+                    let frame = grabber.grab(x, y);
+                    if trick {
+                        unsafe { SetWindowDisplayAffinity(overlay as HWND, WDA_NONE) };
+                    }
+                    shown = trick;
+                    frame
+                }
+            };
             let parts = PARTS.lock().unwrap().clone();
             if !parts.is_empty() {
                 // The selection layer takes a moment to leave the screen, so the first looks count for nothing.

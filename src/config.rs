@@ -36,6 +36,7 @@ pub struct Config {
     pub gpu_limit_mib: Option<u64>, // None: whatever fits
     pub show_frame: bool, // a thin frame around the region while a job runs
     pub flash_frame: bool, // the frame for a moment whenever a translation finishes
+    pub shared: bool, // live translations show in screen sharing and recordings too
     pub source: String, // "auto" leaves the target language alone, "ja" rewrites Japanese too
     pub target: String, // a language code of the model, "ja(easy)" included
     pub ui_lang: String, // "ja" or "en"
@@ -67,6 +68,7 @@ impl Default for Config {
             gpu_limit_mib: None,
             show_frame: false,
             flash_frame: false,
+            shared: false,
             source: "auto".to_string(),
             target: "ja".to_string(),
             ui_lang: system_language().to_string(),
@@ -100,6 +102,7 @@ impl Config {
         config.gpu_limit_mib = saved["gpu_limit_mib"].as_u64();
         config.show_frame = saved["show_frame"].as_bool().unwrap_or(false);
         config.flash_frame = saved["flash_frame"].as_bool().unwrap_or(false);
+        config.shared = saved["shared"].as_bool().unwrap_or(false);
         if let Some(source) = saved["source"].as_str().filter(|s| *s == "ja") {
             config.source = source.to_string();
         }
@@ -144,6 +147,7 @@ impl Config {
             "gpu_limit_mib": self.gpu_limit_mib,
             "show_frame": self.show_frame,
             "flash_frame": self.flash_frame,
+            "shared": self.shared,
             "source": self.source,
             "target": self.target,
             "ui_lang": self.ui_lang,
@@ -254,6 +258,7 @@ mod tests {
         config.gpu_limit_mib = Some(1536);
         config.show_frame = true;
         config.flash_frame = true;
+        config.shared = true;
         config.source = "ja".into();
         config.target = "ja(easy)".into();
         config.ui_lang = "en".into();
