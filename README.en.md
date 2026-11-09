@@ -38,7 +38,7 @@ Select a region by dragging. While dragging, a green line appears outside the re
 
 While selecting a region, a bar appears at the top of the screen. You can toggle the source, target, and live settings on or off here.
 
-While translating, press Ctrl+Alt+T or Ctrl+Alt+R again, then drag while holding Shift to add a region. You can simultaneously translate distant areas, such as subtitles and the chat field. If you don't hold Shift, the current translation will stop and be replaced by the new region.
+While translating, press Ctrl+Alt+T or Ctrl+Alt+R again, then drag while holding Shift to add a region. Clicking a window while holding Shift adds that whole window. You can simultaneously translate distant areas or other apps, such as subtitles and the chat field, or a game and a comment viewer. If you don't hold Shift, the current translation will stop and be replaced by the new region.
 
 Each region operates in the mode selected for that selection. When "live" is on in the bar, the selected region is translated in real time; when off, the selected region is translated as a one-shot translation. For one-shot translations, only the translation for that specific region disappears when the page changes. When multiple regions are selected, they will not move with the window.
 
@@ -157,7 +157,7 @@ The more layers you pass to the CPU, the slower it becomes, so use the GPU memor
 - By default, live translations will not appear in screenshots or recordings. This is to prevent OCR from reading its own translations. With "Show live translations in screen sharing and recordings" turned on in the settings, they do appear when the region is inside one window. One-shot translations will appear, though they may occasionally fail to do so. When multiple regions are selected, the one-shot translation region will also not appear.
 - In live mode, text over photos or gradients is covered by a solid-colored square.
 - Vertically written and rotated text cannot be read.
-- Regions where the long side exceeds 1,600 pixels are scaled down before being read, making small characters harder to read. When there are multiple regions, the size is calculated by enclosing all of them, so distant regions are treated the same.
+- Regions where the long side exceeds 1,600 pixels are scaled down before being read, making small characters harder to read. When there are multiple regions, each is measured on its own.
 - In one-shot translations, the text disappears if 8% or more of the pixels change. It may remain with slight scrolling. Use live mode to make it follow the screen.
 - Exclusive full-screen games and copy-protected videos are not supported.
 

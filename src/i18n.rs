@@ -34,7 +34,7 @@ const ENGLISH: &[(&str, &str)] = &[
     ("クリップボードが使えません", "The clipboard is busy"),
     ("一時停止中", "Paused"),
     ("一時停止", "Pause"),
-    ("Shift+ドラッグで範囲を追加", "Shift+drag adds a region"),
+    ("Shift+ドラッグかクリックで範囲を追加", "Shift+drag or click adds a region"),
     ("翻訳元", "From"),
     ("翻訳先", "Into"),
     ("リアルタイム", "Live"),

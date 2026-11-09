@@ -344,11 +344,9 @@ fn hold_still(patches: &mut Vec<Patch>, (basis, shown): &(Vec<u8>, Vec<Patch>), 
 
 /// Hands changed frames to the worker. Live, every change counts, and text whose pixels have
 /// changed comes off straight away. One-shot, the job ends once most of the page has changed.
-/// Several regions are read as one picture of the area around them, blank between them: a live
+/// Several regions are watched as one picture of the area around them, blank between them: a live
 /// region as it is now, a one-shot region as it first was, so that only live ones get translated
 /// again. Returns the one-shot regions whose page has changed, which are done with.
-// shortcut: regions far apart make a large picture, which OCR scales down; read them one by one
-// if small text across the screen turns out to matter.
 fn keep_parts(frame: &[u8], out: &mut Vec<u8>, width: usize, (x, y): (i32, i32), parts: &[Part], still: &mut Vec<(Region, Vec<u8>)>) -> Vec<Region> {
     let height = frame.len() / 4 / width;
     let mut gone = Vec::new();
@@ -538,6 +536,35 @@ fn give_up_on_stale_work(frame: &[u8], width: usize, shared: &Shared) {
     }
 }
 
+/// OCR of a frame. Several regions are read one by one: the picture around regions far apart, a
+/// game on one screen and comments on another, is large, and OCR scales a large picture down
+/// until small text is lost.
+fn read_lines(ocr: &ocr::Ocr, frame: &[u8], w: usize, h: usize) -> Result<Vec<ocr::Line>, String> {
+    let parts = PARTS.lock().unwrap().clone();
+    let Some(job) = (*JOB.lock().unwrap()).filter(|_| !parts.is_empty()) else { return ocr.read(frame, w, h) };
+    let mut lines = Vec::new();
+    for part in parts {
+        let r = part.region;
+        let span = |from: i32, length: i32, at: i32, limit: usize| ((from - at).clamp(0, limit as i32) as usize, (from + length - at).clamp(0, limit as i32) as usize);
+        let (left, right) = span(r.x, r.w, job.region.x, w);
+        let (top, bottom) = span(r.y, r.h, job.region.y, h);
+        if right <= left || bottom <= top {
+            continue;
+        }
+        for mut line in ocr.read(&crop(frame, w, (left, top, right, bottom)), right - left, bottom - top)? {
+            line.glyphs.x += left as i32;
+            line.glyphs.y += top as i32;
+            lines.push(line);
+        }
+    }
+    Ok(lines)
+}
+
+/// The rectangle from left to right and top to bottom of a BGRA picture `w` wide.
+fn crop(frame: &[u8], w: usize, (left, top, right, bottom): (usize, usize, usize, usize)) -> Vec<u8> {
+    (top..bottom).flat_map(|row| &frame[(row * w + left) * 4..(row * w + right) * 4]).copied().collect()
+}
+
 fn translate_frame(
     frame: &Frame,
     live: bool,
@@ -552,7 +579,7 @@ fn translate_frame(
     let Frame { pixels, w, h } = frame;
     let (w, h) = (*w, *h);
     let frame = pixels.as_slice();
-    let lines = models.as_ref().unwrap().read(frame, w, h)?;
+    let lines = read_lines(models.as_ref().unwrap(), frame, w, h)?;
     let blocks = ocr::paragraphs(&lines);
     let blocks: Vec<&ocr::Block> = blocks.iter().filter(|b| !ocr::looks_like_code(&b.text)).collect();
     let everything = blocks.iter().map(|block| Patch::new(frame, w, h, block, String::new())).collect();
@@ -1986,6 +2013,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crop_takes_the_rows_and_columns_asked_for() {
+        // 3 wide, 2 high: each pixel's first byte is its index.
+        let frame: Vec<u8> = (0..6u8).flat_map(|i| [i, 0, 0, 255]).collect();
+        let part = crop(&frame, 3, (1, 0, 3, 2));
+        assert_eq!(part.chunks(4).map(|px| px[0]).collect::<Vec<_>>(), vec![1, 2, 4, 5]);
+    }
 
     #[test]
     fn only_the_parts_of_a_picture_are_kept() {
