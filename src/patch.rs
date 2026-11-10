@@ -444,6 +444,20 @@ impl Patch {
         self.x < other.x + other.w && other.x < self.x + self.w && self.y < other.y + other.h && other.y < self.y + self.h
     }
 
+    /// True when the picture under this patch is the same in `other`, all but a speck of it: a
+    /// still background, which the picture with the letters painted out can stand in for.
+    pub fn still_in(&self, frame: &[u8], other: &[u8], width: usize) -> bool {
+        if other.len() != frame.len() {
+            return false;
+        }
+        let height = frame.len() / 4 / width;
+        let (x0, x1) = (self.x.max(0) as usize, ((self.x + self.w).max(0) as usize).min(width));
+        let (y0, y1) = (self.y.max(0) as usize, ((self.y + self.h).max(0) as usize).min(height));
+        let area = x1.saturating_sub(x0) * y1.saturating_sub(y0);
+        let moved = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| distance(pixel(frame, width, x, y), pixel(other, width, x, y)) > SAME_BG).count();
+        moved * 100 <= area
+    }
+
     /// True once the original text is no longer there.
     pub fn is_stale(&self, frame: &[u8], basis: &[u8], width: usize) -> bool {
         self.changed_percent(frame, basis, width) > GLYPH_STALE_PERCENT
@@ -753,6 +767,20 @@ mod tests {
         one.lines = 2;
         let p = Patch::new(&img, 300, 40, &one, "訳".into());
         assert_eq!(p.max_w, p.w);
+    }
+
+    #[test]
+    fn a_still_background_is_told_from_a_moving_one() {
+        let before = canvas(100, 40, WHITE);
+        let mut after = before.clone();
+        let p = Patch { x: 10, y: 10, w: 50, h: 20, ..Patch::status("", 50) };
+        assert!(p.still_in(&before, &after, 100));
+        paint(&mut after, 100, (20, 12, 50, 28), BLACK, 1); // something passes behind the text
+        assert!(!p.still_in(&before, &after, 100));
+        let mut beside = before.clone();
+        paint(&mut beside, 100, (70, 12, 90, 28), BLACK, 1); // outside the patch nothing counts
+        assert!(p.still_in(&before, &beside, 100));
+        assert!(!p.still_in(&before, &canvas(100, 41, WHITE), 100)); // another region altogether
     }
 
     #[test]

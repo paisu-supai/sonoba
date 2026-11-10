@@ -73,6 +73,7 @@ const REC_MAX_WIDTH: usize = 3200;
 const TEXT_SCORE: f32 = 0.5;
 const SURE_SCORE: f32 = 0.93; // a line read this well is in a script PP-OCRv6 knows, and needs no second look
 const OTHER_SCORE: f32 = 0.8; // a reading by another script's model this sure is no guess, even if it is mostly English
+const PICTURE_TEXT_SCORE: f32 = 0.8; // over a picture, a reading less sure than this is a pattern, not text
 const ROOMY_SCORE: f32 = 0.97; // below this, a line with an accented letter is read again with more room
 const ROW_GAP: i32 = 8; // labels in a row stand at most this many line heights apart
 
@@ -213,7 +214,11 @@ impl Ocr {
         let margin = (ink.h / 2) as usize;
         let top = ((ink.y + PAD as i32) as usize).saturating_sub(margin).max(y);
         let bottom = ((ink.y + ink.h + PAD as i32) as usize + margin).min(y + bh);
-        let text = self.recognize(img, (x, top, bw, bottom.saturating_sub(top)))?;
+        let (text, score) = self.recognize(img, (x, top, bw, bottom.saturating_sub(top)))?;
+        // A lattice, a leaf pattern or a scene's detail can pass for a few letters, but reads unsure.
+        if ink.picture && score < PICTURE_TEXT_SCORE {
+            return Ok(None);
+        }
         let first_word = text.split(' ').next().unwrap_or("");
         Ok(patch::glyphs(bgra, w, h, in_frame, Some(first_word))
             .filter(|_| !text.is_empty())
@@ -244,10 +249,11 @@ impl Ocr {
         Ok(boxes)
     }
 
-    fn recognize(&self, img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<String, String> {
+    /// The text in `rect` and how sure the reading is.
+    fn recognize(&self, img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32), String> {
         let (x, y, bw, bh) = rect;
         if bw == 0 || bh == 0 {
-            return Ok(String::new());
+            return Ok((String::new(), 0.0));
         }
         let (mut text, mut score) = self.read_with(&self.rec, &self.chars, img, rect)?;
         // An ascender close under the box's edge can read as an accent, "Online" as "Oníine". A
@@ -281,10 +287,10 @@ impl Ocr {
             }
             if let Some((i, other)) = best {
                 self.last.store(i, Ordering::Relaxed);
-                return Ok(other);
+                return Ok((other, best_score));
             }
         }
-        Ok(if score < TEXT_SCORE { String::new() } else { text })
+        Ok(if score < TEXT_SCORE { (String::new(), 0.0) } else { (text, score) })
     }
 
     fn read_with(&self, model: &Model, chars: &[&str], img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32), String> {
@@ -906,5 +912,6 @@ mod tests {
         assert_eq!(text_of(&ocr, "ui-14px"), text_of(&Ocr::new(4, &[]).unwrap(), "ui-14px"));
     }
 }
+
 
 
