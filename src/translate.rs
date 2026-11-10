@@ -257,12 +257,18 @@ impl Translator {
     }
 }
 
-/// One paragraph per line, in reading order, so that labels and their neighbours go together.
+/// One paragraph per line, in reading order, so that neighbours give each other context. A label
+/// or other fragment goes alone: among others the model may join or reorder such pieces, and the
+/// lines then come back the same in number but in the wrong places.
 fn chunks<'a>(texts: &[&'a str]) -> Vec<Vec<&'a str>> {
     let mut out: Vec<Vec<&str>> = Vec::new();
     let mut chars = 0;
+    let mut open = false; // whether the last chunk takes more
     for &text in texts {
-        match out.last_mut().filter(|_| chars + text.len() <= CHUNK_CHARS) {
+        let alone = is_fragment(text);
+        let joins = open && !alone;
+        open = !alone;
+        match out.last_mut().filter(|_| joins && chars + text.len() <= CHUNK_CHARS) {
             Some(chunk) => {
                 chunk.push(text);
                 chars += text.len();
@@ -274,6 +280,11 @@ fn chunks<'a>(texts: &[&'a str]) -> Vec<Vec<&'a str>> {
         }
     }
     out
+}
+
+/// A few words, or a short run of Japanese or Chinese, which has no spaces to count.
+fn is_fragment(text: &str) -> bool {
+    text.split_whitespace().count() < 4 && text.chars().count() < 20
 }
 
 /// Cuts a long paragraph at the ends of sentences, so that no reply gets cut off.
@@ -582,9 +593,17 @@ mod tests {
 
     #[test]
     fn chunks_keep_order_and_stay_short() {
-        let long = "x".repeat(CHUNK_CHARS + 50);
-        let texts = ["a", "b", long.as_str(), "c"];
-        assert_eq!(chunks(&texts), [vec!["a", "b"], vec![long.as_str()], vec!["c"]]);
+        let long = "x ".repeat(CHUNK_CHARS / 2 + 25);
+        let (a, b, c) = ("The first sentence is here.", "And a second one follows it.", "A third sentence comes after.");
+        let texts = [a, b, long.as_str(), c];
+        assert_eq!(chunks(&texts), [vec![a, b], vec![long.as_str()], vec![c]]);
+    }
+
+    #[test]
+    fn labels_go_alone() {
+        let s = "Create standalone project files or connect";
+        let texts = ["Project for", "the web", s, "Project Online desktop client", "設定", "ダウンロードが終わったら、設定を保存してから閉じてください。"];
+        assert_eq!(chunks(&texts), [vec!["Project for"], vec!["the web"], vec![s, "Project Online desktop client"], vec!["設定"], vec![texts[5]]]);
     }
 
     /// Runs `translate_chunk` against a fake model that answers from `replies`.
