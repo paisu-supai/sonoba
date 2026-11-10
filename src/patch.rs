@@ -14,6 +14,7 @@ pub const WOBBLE_PERCENT: usize = 2; // edges that change without the text chang
 const EDGE_COLUMNS: usize = 2;
 const EDGE_PX: usize = 2; // a text edge rises within this many pixels, most of a video's do not
 const LETTER_FRINGE: usize = 2; // antialiasing around the letters goes with them
+const GLOW_PX: usize = 4; // how far a glow or outline reaches from the letters
 const SMOOTHING: usize = 4; // passes over a painted-out letter, so that no outline of it shows
 const SAME_BG: i32 = 30;
 const SAME_FG: i32 = 80; // thin text rarely reaches its true colour, so allow for that
@@ -69,6 +70,7 @@ pub struct Patch {
     pub y: i32,
     pub w: i32,
     pub max_w: i32, // how far a single line may spread over empty background
+    pub one_line: bool, // the original is one line, so the translation narrows before it wraps
     pub h: i32,     // 0 until laid out for a status message
     pub em: i32,    // the original's font size, which the translation tries to keep
     pub bg: u32,
@@ -255,7 +257,9 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
                 runs[run.min(31)] += 1;
                 run = 0;
             }
-            if far > farthest {
+            // The letters fill the box's middle; its top and bottom can catch a bright speck of a
+            // picture behind a short label.
+            if far > farthest && middle.contains(&row) {
                 (fg, farthest) = (p, far);
             }
         }
@@ -267,9 +271,35 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     // too, but nearer to it than to the letters. The letters alone give the size and the stems.
     let h = (bottom - top) as i32;
     let letter = |col: usize, row: usize| is_letter(pixel(bgra, width, col, row), fg, bg, picture);
-    let rows: Vec<usize> = (top..bottom).filter(|&row| cols.iter().any(|&col| letter(col, row))).collect();
-    let letters = rows.last().map_or(0, |last| last + 1 - rows[0]) as i32;
-    let glow = letters > 0 && letters * 8 < h * 7;
+    // Bands of rows with letters in them. The densest is the letters; one past a gap counts only
+    // if it is about as tall as the gap, as the dot of an i is and a speck of the picture is not,
+    // and stops short of the box's edge, which cuts through the picture but not through letters.
+    let counts: Vec<usize> = (top..bottom).map(|row| cols.iter().filter(|&&col| letter(col, row)).count()).collect();
+    let mut bands: Vec<(usize, usize)> = Vec::new();
+    for (i, _) in counts.iter().enumerate().filter(|(_, n)| **n > 0) {
+        match bands.last_mut() {
+            Some(run) if run.1 == i => run.1 += 1,
+            _ => bands.push((i, i + 1)),
+        }
+    }
+    let densest = counts.iter().enumerate().max_by_key(|(_, n)| **n).map_or(0, |(i, _)| i);
+    let letters = match bands.iter().position(|r| r.0 <= densest && densest < r.1) {
+        Some(main) => {
+            let apart = |(start, end): (usize, usize), gap: usize| (end - start) * 2 < gap || top + start == y0 || top + end == y1;
+            let (mut a, mut b) = (main, main);
+            while a > 0 && !apart(bands[a - 1], bands[a].0 - bands[a - 1].1) {
+                a -= 1;
+            }
+            while b + 1 < bands.len() && !apart(bands[b + 1], bands[b + 1].0 - bands[b].1) {
+                b += 1;
+            }
+            (bands[b].1 - bands[a].0) as i32
+        }
+        None => 0,
+    };
+    // Over a picture the background's own pixels pass for ink, and a tight box can cut a glow
+    // off so that little of it is left: there the letters' own colour gives the measure.
+    let glow = letters > 0 && (letters * 8 < h * 7 || picture && letters < h);
     if glow {
         runs = [0; 32];
         for row in top..bottom {
@@ -336,8 +366,9 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
 }
 
 /// Takes the letters off a picture and leaves the rest of it. The rows just outside the box say
-/// what lies behind the text, and a pixel far from that is a letter.
-fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (usize, usize, usize, usize)) -> Backdrop {
+/// what lies behind the text, and a pixel far from that is a letter, or its glow, if it is near
+/// a pixel of the letters' colour: a dark sleeve beside a label is the picture.
+fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (usize, usize, usize, usize), fg: [i32; 3]) -> Backdrop {
     let radius = h.max(8);
     let smooth_row = |row: usize| -> Vec<[i32; 3]> {
         (x..x + w)
@@ -359,10 +390,12 @@ fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (us
         [0, 1, 2].map(|c| (a[c] * up + b[c] * down) / (up + down))
     };
 
+    let ink: Vec<bool> = (0..w * h).map(|i| distance(pixel(bgra, width, x + i % w, y + i / w), fg) <= SAME_FG).collect();
     let mut letter = vec![false; w * h];
     for row in 0..h {
         for col in 0..w {
-            letter[row * w + col] = distance(pixel(bgra, width, x + col, y + row), behind(col, row)) > GLYPH_DISTANCE;
+            let near = || (row.saturating_sub(GLOW_PX)..(row + GLOW_PX + 1).min(h)).any(|r| (col.saturating_sub(GLOW_PX)..(col + GLOW_PX + 1).min(w)).any(|c| ink[r * w + c]));
+            letter[row * w + col] = distance(pixel(bgra, width, x + col, y + row), behind(col, row)) > GLYPH_DISTANCE && near();
         }
     }
     let grown: Vec<bool> = (0..w * h)
@@ -406,7 +439,7 @@ impl Patch {
         let free = ((g.x + g.w) as usize..width).find(|&col| !empty(col)).unwrap_or(width) as i32;
         let max_w = if block.lines == 1 { (free - MARGIN - x).max(w) } else { w };
         let (bg, fg) = (colorref(g.bg), colorref(g.fg));
-        Self { x, y, w, max_w, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
+        Self { x, y, w, max_w, one_line: block.lines == 1, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
     }
 
     /// On a still picture the text goes without the picture going with it. A video would move on
@@ -415,7 +448,8 @@ impl Patch {
     /// its antialiased edge would take on the overlay's see-through colour.
     pub fn keep_picture(mut self, bgra: &[u8], width: usize, height: usize) -> Self {
         let area = (self.x as usize, self.y as usize, self.w.max(self.max_w) as usize, self.h as usize);
-        self.backdrop = Some(Arc::new(paint_out_letters(bgra, width, height, area)));
+        let fg = [(self.fg >> 16 & 0xFF) as i32, (self.fg >> 8 & 0xFF) as i32, (self.fg & 0xFF) as i32];
+        self.backdrop = Some(Arc::new(paint_out_letters(bgra, width, height, area, fg)));
         self
     }
 
@@ -532,6 +566,7 @@ impl Patch {
             y: 0,
             w: width,
             max_w: width,
+            one_line: false,
             h: 0,
             em: 0,
             bg: STATUS_BG,
@@ -765,6 +800,22 @@ mod tests {
         assert_eq!(glyphs(&img, 100, 30, (0, 0, 100, 30), Some("word")).unwrap().h, 14);
     }
 
+    /// A game's label has a glow, and a speck of the picture behind it can fall inside the glow,
+    /// apart from the letters; the dot of an i sits just as far apart but is about as tall.
+    #[test]
+    fn a_speck_apart_from_the_letters_is_not_part_of_them() {
+        let label = |box_top: usize, mark: (usize, usize)| {
+            let mut img = canvas(200, 60, WHITE);
+            paint(&mut img, 200, (8, 12, 64, 44), [190, 190, 190], 1); // the glow
+            paint(&mut img, 200, (10, 20, 61, 40), BLACK, 3);
+            paint(&mut img, 200, (20, mark.0, 26, mark.1), BLACK, 1);
+            glyphs(&img, 200, 60, (0, box_top as i32, 200, (60 - box_top) as i32), Some("word")).unwrap().letters
+        };
+        assert_eq!(label(0, (14, 15)), 20); // a speck: one row, five rows above
+        assert_eq!(label(0, (16, 19)), 24); // a dot: three rows, one row above
+        assert_eq!(label(12, (12, 15)), 20); // the picture, cut off by the box's top
+    }
+
     #[test]
     fn one_line_may_spread_over_empty_background_only() {
         let mut img = canvas(300, 40, WHITE);
@@ -877,10 +928,12 @@ mod tests {
         for left in (20..270).step_by(16) {
             paint(&mut img, w, (left, 20, left + 6, 40), WHITE, 1);
         }
-        let b = paint_out_letters(&img, w, h, (10, 16, 280, 28));
+        paint(&mut img, w, (275, 18, 285, 42), BLACK, 1); // a dark sleeve beside the text
+        let b = paint_out_letters(&img, w, h, (10, 16, 280, 28), [255; 3]);
         let at = |x: usize, y: usize| pixel(&b.bgra, 280, x - 10, y - 16);
         assert!(distance(at(22, 30), pixel(&before, w, 22, 30)) < 30, "{:?}", at(22, 30));
         assert_eq!(at(32, 30), pixel(&before, w, 32, 30), "between the letters nothing changes");
+        assert_eq!(at(280, 30), [0; 3], "the sleeve stays");
     }
 
     #[test]
@@ -890,7 +943,7 @@ mod tests {
         for p in img.chunks_mut(4) {
             p.copy_from_slice(&[255, 0, 255, 255]);
         }
-        let b = paint_out_letters(&img, w, h, (5, 5, 20, 10));
+        let b = paint_out_letters(&img, w, h, (5, 5, 20, 10), [255; 3]);
         assert!(b.bgra.chunks(4).all(|p| p[..3] != [255, 0, 255]));
     }
 
