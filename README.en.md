@@ -85,7 +85,7 @@ The default "Auto" runs the portion in GPU memory on the GPU and the remainder o
 
 There is no RAM limit. Since RAM usage is determined by model size and the amount of data loaded onto the GPU, you can reduce usage by choosing a lighter model or increasing the amount of data loaded onto the GPU.
 
-Launching the app again will open the settings for the running instance. If it crashes unexpectedly, the cause is written to the `crash.log` file in the `data` folder.
+Launching the app again will open the settings for the running instance. The `sonoba.log` file in the `data` folder records when the app started and why it ended, including the cause if it crashes unexpectedly.
 
 ## Supported Languages
 
