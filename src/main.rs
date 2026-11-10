@@ -1707,6 +1707,7 @@ unsafe fn tray_menu(hwnd: HWND) {
             MENU_SETTINGS => settings::open(),
             MENU_PAUSE => toggle_pause(),
             MENU_EXIT => {
+                log("quit from the tray menu");
                 DestroyWindow(hwnd);
             }
             _ => {}
@@ -1914,6 +1915,21 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             }
             // The tray menu leaves this hidden window in front, so a later Alt+F4 would quit Sonoba unseen.
             WM_SYSCOMMAND if w & 0xFFF0 == SC_CLOSE as usize => 0,
+            WM_CLOSE => {
+                log("closed by another program");
+                DefWindowProcW(hwnd, msg, w, l)
+            }
+            WM_ENDSESSION if w != 0 => {
+                let flags = l as u32;
+                log(if flags & ENDSESSION_CLOSEAPP != 0 {
+                    "closed by Windows for an installer or update"
+                } else if flags & ENDSESSION_LOGOFF != 0 {
+                    "closed by Windows signing out"
+                } else {
+                    "closed by Windows shutting down or restarting"
+                });
+                0
+            }
             WM_DESTROY => {
                 tray_icon(hwnd, NIM_DELETE);
                 PostQuitMessage(0);
@@ -1991,20 +2007,27 @@ unsafe fn register_class(name: *const u16, proc: WNDPROC, cursor: *const u16) {
     }
 }
 
-/// Release builds abort on a panic and have no console, so this is the only trace one leaves.
+static LOG: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+/// Release builds abort on a panic and have no console, and a quiet end leaves no trace either,
+/// so when Sonoba started, why it ended, and any panic go to data\sonoba.log.
 fn log_panics() {
-    let path = models::dir().parent().map(|dir| dir.join("crash.log"));
-    std::panic::set_hook(Box::new(move |info| {
-        let Some(path) = &path else { return };
-        let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            use std::io::Write;
-            let _ = writeln!(file, "{when}: {info}");
-        }
-    }));
+    LOG.get_or_init(|| models::dir().parent().map(|dir| dir.join("sonoba.log")));
+    std::panic::set_hook(Box::new(|info| log(&info.to_string())));
+}
+
+fn log(text: &str) {
+    let Some(Some(path)) = LOG.get() else { return };
+    let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let (y, mo, d, h, mi, s) = (t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        let _ = writeln!(file, "{y}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} {text}");
+    }
 }
 
 /// A second start opens the settings of the first, which is usually what was wanted.
@@ -2025,6 +2048,7 @@ fn main() {
     if already_running() {
         return;
     }
+    log(concat!("started ", env!("CARGO_PKG_VERSION")));
     settings::carry_over_autostart();
     unsafe {
         CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32); // WebView2 asks for it
