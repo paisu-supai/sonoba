@@ -16,7 +16,7 @@ const SOURCES: [(&str, &str); 2] = [("auto", "自動"), ("ja", "日本語も翻�
 const TARGETS: [(&str, &str); 6] =
     [("ja", "日本語"), ("ja(easy)", "やさしい日本語"), ("en", "英語"), ("ko", "韓国語"), ("zh-hans", "中国語（簡体字）"), ("zh-hant", "中国語（繁体字）")];
 const CHIPS: usize = 3;
-const ADD_HINT: &str = "Shift+ドラッグかクリックで範囲を追加";
+const ADD_HINT: &str = "Shift+ドラッグかクリックで範囲を追加、範囲の中を右クリックで削除";
 const LIVE: usize = 2; // the one chip that is a switch, not a list
 const BAR_H: i32 = 48;
 const PAD: i32 = 8;
@@ -184,6 +184,12 @@ pub fn show(live: bool, running: bool) {
         lay_out();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
+}
+
+/// The hint about regions is only for when there are some.
+pub fn set_running(running: bool) {
+    RUNNING.set(running);
+    lay_out();
 }
 
 pub fn hide() {
