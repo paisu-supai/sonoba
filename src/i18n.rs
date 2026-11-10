@@ -8,6 +8,7 @@ const ENGLISH: &[(&str, &str)] = &[
     ("翻訳する文字が見つかりません", "No text to translate"),
     ("エラー: ", "Error: "),
     ("設定", "Settings"),
+    ("履歴", "History"),
     ("終了", "Exit"),
     ("ダブルクリックで設定を開きます", "Double-click for settings"),
     ("ホットキーを登録できません。別のアプリが使っています。設定で変更してください。", "A hotkey is taken by another app. Change it in the settings."),

@@ -88,6 +88,7 @@ const FLASH_COLOR: u32 = 0x0088FF39;
 const MENU_EXIT: usize = 1;
 const MENU_SETTINGS: usize = 2;
 const MENU_PAUSE: usize = 3;
+const MENU_HISTORY: usize = 4;
 const HK_PROBE: i32 = 5;
 
 const DIM_ALPHA: u8 = 110;
@@ -1695,6 +1696,7 @@ unsafe fn tray_menu(hwnd: HWND) {
     unsafe {
         let menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, MENU_SETTINGS, wide_z(&t("設定")).as_ptr());
+        AppendMenuW(menu, MF_STRING, MENU_HISTORY, wide_z(&t("履歴")).as_ptr());
         let paused = if SUSPENDED.load(Ordering::Relaxed) { MF_CHECKED } else { 0 };
         AppendMenuW(menu, MF_STRING | paused, MENU_PAUSE, wide_z(&t("一時停止")).as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_EXIT, wide_z(&t("終了")).as_ptr());
@@ -1705,6 +1707,7 @@ unsafe fn tray_menu(hwnd: HWND) {
         DestroyMenu(menu);
         match chosen as usize {
             MENU_SETTINGS => settings::open(),
+            MENU_HISTORY => settings::open_history(),
             MENU_PAUSE => toggle_pause(),
             MENU_EXIT => {
                 log("quit from the tray menu");
