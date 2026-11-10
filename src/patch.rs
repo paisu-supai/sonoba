@@ -266,10 +266,7 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     // Letters with a glow or an outline, as games draw them: the halo is far from the background
     // too, but nearer to it than to the letters. The letters alone give the size and the stems.
     let h = (bottom - top) as i32;
-    let letter = |col: usize, row: usize| {
-        let p = pixel(bgra, width, col, row);
-        distance(p, fg) < distance(p, bg)
-    };
+    let letter = |col: usize, row: usize| is_letter(pixel(bgra, width, col, row), fg, bg, picture);
     let rows: Vec<usize> = (top..bottom).filter(|&row| cols.iter().any(|&col| letter(col, row))).collect();
     let letters = rows.last().map_or(0, |last| last + 1 - rows[0]) as i32;
     let glow = letters > 0 && letters * 8 < h * 7;
@@ -294,6 +291,13 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     Some(Glyphs { x, y, w: right as i32 + 1 - x, h, letters: if glow { letters } else { h }, bg, fg, stem, icon, picture })
 }
 
+/// A pixel of the letters themselves, not of a glow around them. Over a picture, bright patches
+/// of it (hair, a sky) can sit nearer white letters than the picture's average does, so there a
+/// letter's pixel must be close to the letters' colour as well.
+fn is_letter(p: [i32; 3], fg: [i32; 3], bg: [i32; 3], picture: bool) -> bool {
+    distance(p, fg) < distance(p, bg) && (!picture || distance(p, fg) <= SAME_FG)
+}
+
 /// The detector box cut at blank gaps at least one and a half letters wide and well over the
 /// line's usual space between words: a menu bar or the cells of a table, read as one line, are
 /// each their own label. `chars` is how many letters the line was read as, which gives their
@@ -306,6 +310,8 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
     let glow = g.letters < g.h;
     let letter = |col: i32, row: i32| {
         let p = pixel(bgra, width, col as usize, row as usize);
+        // A highlighted item can be another colour than the letters around it, so here any pixel
+        // nearer the letters than the background counts, as long as it is not glow.
         if glow { distance(p, g.fg) < distance(p, g.bg) } else { distance(p, g.bg) > GLYPH_DISTANCE }
     };
     let inked = |col: i32| (g.y..g.y + g.h).any(|row| letter(col, row));
@@ -405,8 +411,10 @@ impl Patch {
 
     /// On a still picture the text goes without the picture going with it. A video would move on
     /// from whatever is painted here, so it keeps the flat box.
+    /// It reaches as far as a translation may spread, so no letter is ever drawn over nothing:
+    /// its antialiased edge would take on the overlay's see-through colour.
     pub fn keep_picture(mut self, bgra: &[u8], width: usize, height: usize) -> Self {
-        let area = (self.x as usize, self.y as usize, self.w as usize, self.h as usize);
+        let area = (self.x as usize, self.y as usize, self.w.max(self.max_w) as usize, self.h as usize);
         self.backdrop = Some(Arc::new(paint_out_letters(bgra, width, height, area)));
         self
     }
@@ -444,20 +452,6 @@ impl Patch {
 
     pub fn overlaps(&self, other: &Patch) -> bool {
         self.x < other.x + other.w && other.x < self.x + self.w && self.y < other.y + other.h && other.y < self.y + self.h
-    }
-
-    /// True when the picture under this patch is the same in `other`, all but a speck of it: a
-    /// still background, which the picture with the letters painted out can stand in for.
-    pub fn still_in(&self, frame: &[u8], other: &[u8], width: usize) -> bool {
-        if other.len() != frame.len() {
-            return false;
-        }
-        let height = frame.len() / 4 / width;
-        let (x0, x1) = (self.x.max(0) as usize, ((self.x + self.w).max(0) as usize).min(width));
-        let (y0, y1) = (self.y.max(0) as usize, ((self.y + self.h).max(0) as usize).min(height));
-        let area = x1.saturating_sub(x0) * y1.saturating_sub(y0);
-        let moved = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| distance(pixel(frame, width, x, y), pixel(other, width, x, y)) > SAME_BG).count();
-        moved * 100 <= area
     }
 
     /// True when the picture under this patch has moved on from the one its backdrop was painted
@@ -793,20 +787,6 @@ mod tests {
         let mut later = canvas(100, 40, [120, 70, 150]); // the scene behind the same text, some steps on
         paint(&mut later, 100, (20, 15, 60, 25), WHITE, 3);
         assert!(p.backdrop_behind(&later, 100));
-    }
-
-    #[test]
-    fn a_still_background_is_told_from_a_moving_one() {
-        let before = canvas(100, 40, WHITE);
-        let mut after = before.clone();
-        let p = Patch { x: 10, y: 10, w: 50, h: 20, ..Patch::status("", 50) };
-        assert!(p.still_in(&before, &after, 100));
-        paint(&mut after, 100, (20, 12, 50, 28), BLACK, 1); // something passes behind the text
-        assert!(!p.still_in(&before, &after, 100));
-        let mut beside = before.clone();
-        paint(&mut beside, 100, (70, 12, 90, 28), BLACK, 1); // outside the patch nothing counts
-        assert!(p.still_in(&before, &beside, 100));
-        assert!(!p.still_in(&before, &canvas(100, 41, WHITE), 100)); // another region altogether
     }
 
     #[test]

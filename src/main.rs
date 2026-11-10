@@ -405,13 +405,6 @@ fn keep_parts(frame: &[u8], out: &mut Vec<u8>, width: usize, (x, y): (i32, i32),
     gone
 }
 
-/// A one-shot region of a job that also has live ones is as still as a one-shot job.
-fn in_still_part(glyphs: &patch::Glyphs) -> bool {
-    let Some(job) = *JOB.lock().unwrap() else { return false };
-    let (x, y) = (job.region.x + glyphs.x, job.region.y + glyphs.y);
-    PARTS.lock().unwrap().iter().any(|p| !p.live && x >= p.region.x && x < p.region.x + p.region.w && y >= p.region.y && y < p.region.y + p.region.h)
-}
-
 fn watch(job: Job, overlay: usize, shared: &Shared) {
     let post = |patches: Vec<Patch>| post_patches(overlay, job.id, patches);
     // Never OCR our own output. The last watcher may have just lifted this, and what was on show
@@ -705,14 +698,12 @@ fn translate_frame(
     let everything = blocks.iter().map(|block| Patch::new(frame, w, h, block, String::new())).collect();
     *shared.working.lock().unwrap() = (frame.to_vec(), everything);
     // Numbers, code and the like come back unchanged: leave the original on show.
-    // Live, text over a moving picture gets a flat box: a painted-out copy of the picture would
-    // stand still in it. Over one that has not moved since this frame, as behind a game's
-    // dialogue, the painted-out copy does, and hides far less.
+    // Over a picture the letters are painted out of a copy of it. Live, the copy is painted again
+    // whenever the picture behind it moves on (`hold_still`, `drop_stale_patches`).
     let patch = |block: &ocr::Block, text: &str| {
         (text.to_lowercase() != block.text.to_lowercase()).then(|| {
             let patch = Patch::new(frame, w, h, block, text.to_string());
-            let still = || !live || in_still_part(&block.glyphs) || patch.still_in(frame, &shared.latest.lock().unwrap(), w);
-            if block.glyphs.picture && still() { patch.keep_picture(frame, w, h) } else { patch }
+            if block.glyphs.picture { patch.keep_picture(frame, w, h) } else { patch }
         })
     };
     // Whatever is known already goes up with the first new line, so nothing flickers.
