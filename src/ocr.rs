@@ -180,7 +180,12 @@ impl Ocr {
 
     pub fn read(&self, bgra: &[u8], w: usize, h: usize) -> Result<Vec<Line>, String> {
         let img = Rgbf::from_bgra_padded(bgra, w, h, PAD);
-        let boxes = self.detect(&img)?;
+        let (pad, boxes) = (PAD as i32, self.detect(&img)?);
+        let boxes: Vec<_> = boxes
+            .iter()
+            .flat_map(|&(x, y, bw, bh)| patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32)))
+            .map(|(x, y, bw, bh)| ((x + pad) as usize, (y + pad) as usize, bw as usize, bh as usize))
+            .collect();
         let lines: Vec<Option<Line>> =
             self.pool.run(|| boxes.par_iter().map(|&rect| self.read_line(bgra, &img, (w, h), rect)).collect::<Result<_, _>>())?;
         let mut lines: Vec<Line> = lines.into_iter().flatten().collect();
@@ -391,6 +396,7 @@ pub struct Block {
     pub glyphs: Glyphs,
     pub lines: i32,
     pub em: i32,
+    pub bold: bool,
     pub text: String,
 }
 
@@ -426,12 +432,44 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
             }
             None => {
                 em_sum = em;
-                out.push(Block { glyphs: *g, lines: 1, em: em.round() as i32, text: line.text.clone() });
+                out.push(Block { glyphs: *g, lines: 1, em: em.round() as i32, bold: g.bold(), text: line.text.clone() });
             }
         }
         prev = Some(line);
     }
+    match_rows(&mut out);
     out
+}
+
+/// Labels side by side in the same colours, such as a menu bar or a row of boxes, share one size
+/// and weight. Each is measured on its own, and a short word gives a poor measure: which letters
+/// it has decides how much of the size its ink shows. The middle size and the commoner weight win.
+/// Their tops line up and their bottoms nearly do, letters below the line aside; a heading beside
+/// body text does neither.
+fn match_rows(blocks: &mut [Block]) {
+    let alike = |a: &Block, b: &Block| {
+        let (ga, gb) = (&a.glyphs, &b.glyphs);
+        let h = ga.h.max(gb.h);
+        let aligned = (ga.y - gb.y).abs() * 4 <= h && (ga.y + ga.h - gb.y - gb.h).abs() * 3 <= h;
+        let colours = ga.same_style(gb) || (ga.picture && gb.picture && ga.same_fg(gb));
+        b.lines == 1 && aligned && colours && a.em.max(b.em) * 2 <= a.em.min(b.em) * 3
+    };
+    let settled: Vec<(i32, bool)> = blocks
+        .iter()
+        .map(|a| {
+            let row: Vec<&Block> = blocks.iter().filter(|b| a.lines == 1 && alike(a, b)).collect();
+            if row.len() < 2 {
+                return (a.em, a.bold);
+            }
+            let mut ems: Vec<i32> = row.iter().map(|b| b.em).collect();
+            ems.sort_unstable();
+            let bold = row.iter().filter(|b| b.bold).count() * 2 >= row.len();
+            (ems[ems.len() / 2], bold)
+        })
+        .collect();
+    for (block, (em, bold)) in blocks.iter_mut().zip(settled) {
+        (block.em, block.bold) = (em, bold);
+    }
 }
 
 /// Japanese and Chinese wrap anywhere, with no space to put back.
@@ -692,6 +730,33 @@ mod tests {
         let got = paragraphs(&lines).iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join(" / ");
         println!("{got}");
         assert!(got.contains("이 프로그램은 화면의 글자를 번역합니다") && got.contains("언어를 바꿀 수 있습니다"), "{got}");
+    }
+
+    #[test]
+    fn a_menu_bar_reads_as_one_label_per_item() {
+        let ocr = Ocr::new(4, &[]).unwrap();
+        let (bgra, w, h) = png_bgra("testdata/menu.png");
+        let got: Vec<String> = paragraphs(&ocr.read(&bgra, w, h).unwrap()).into_iter().map(|b| b.text).collect();
+        assert_eq!(got, ["Back", "Save", "Q.Save", "Q.Load", "Skip", "Auto", "Prefs", "Save your work before you close the window."]);
+    }
+
+    #[test]
+    fn labels_in_a_row_share_size_and_weight() {
+        let block = |x, (y, h), em, bold, fg| {
+            let glyphs = Glyphs { x, y, w: 40, h, bg: [40, 120, 40], fg, stem: 1, icon: false, picture: false };
+            Block { glyphs, lines: 1, em, bold, text: "x".into() }
+        };
+        let (white, black, label, heading) = ([255; 3], [0; 3], (0, 14), (-6, 22));
+        let mut row = [
+            block(0, label, 17, true, white),
+            block(50, label, 13, false, white),
+            block(100, label, 17, true, white),
+            block(150, label, 12, false, black),
+            block(200, heading, 19, true, white),
+        ];
+        match_rows(&mut row);
+        let got: Vec<_> = row.iter().map(|b| (b.em, b.bold)).collect();
+        assert_eq!(got, [(17, true), (17, true), (17, true), (12, false), (19, true)]);
     }
 
     fn with_korean() -> Ocr {

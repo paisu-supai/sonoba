@@ -2377,7 +2377,7 @@ mod tests {
                 fit(mem, patch, STATUS_PX);
             }
             for p in &patches {
-                println!("{},{} {}x{} em={} px={} bold={} {}", p.x, p.y, p.w, p.h, p.em, p.px, p.bold, p.text);
+                println!("{},{} {}x{} em={} px={} bold={} {} <- {}", p.x, p.y, p.w, p.h, p.em, p.px, p.bold, p.text, p.source);
             }
             draw_patches(mem, &patches);
             GdiFlush();

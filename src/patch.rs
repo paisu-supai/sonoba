@@ -45,7 +45,11 @@ impl Glyphs {
 
     /// True when two lines sit on the same background in the same ink.
     pub fn same_style(&self, other: &Glyphs) -> bool {
-        distance(self.bg, other.bg) <= SAME_BG && distance(self.fg, other.fg) <= SAME_FG
+        distance(self.bg, other.bg) <= SAME_BG && self.same_fg(other)
+    }
+
+    pub fn same_fg(&self, other: &Glyphs) -> bool {
+        distance(self.fg, other.fg) <= SAME_FG
     }
 }
 
@@ -257,6 +261,25 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     Some(Glyphs { x, y, w: right as i32 + 1 - x, h: (bottom - top) as i32, bg, fg, stem, icon, picture })
 }
 
+/// The detector box cut at blank gaps nearly as wide as the letters are tall, wider than any
+/// space between words: a menu bar or the cells of a table, read as one line, are each their own
+/// label. Each piece reaches halfway into the gaps on either side.
+pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32)) -> Vec<(i32, i32, i32, i32)> {
+    let Some(g) = glyphs(bgra, width, height, rect, None) else { return vec![rect] };
+    let inked = |col: i32| (g.y..g.y + g.h).any(|row| distance(pixel(bgra, width, col as usize, row as usize), g.bg) > GLYPH_DISTANCE);
+    let (mut cuts, mut blank_from) = (Vec::new(), None);
+    for col in g.x..g.x + g.w {
+        if !inked(col) {
+            blank_from.get_or_insert(col);
+        } else if let Some(start) = blank_from.take().filter(|&start| (col - start) * 10 >= g.h * 9) {
+            cuts.push((start + col) / 2);
+        }
+    }
+    let (x, y, w, h) = rect;
+    let edges: Vec<i32> = std::iter::once(x).chain(cuts).chain(std::iter::once(x + w)).collect();
+    edges.windows(2).map(|e| (e[0], y, e[1] - e[0], h)).collect()
+}
+
 /// Takes the letters off a picture and leaves the rest of it. The rows just outside the box say
 /// what lies behind the text, and a pixel far from that is a letter.
 fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (usize, usize, usize, usize)) -> Backdrop {
@@ -327,7 +350,7 @@ impl Patch {
         let free = ((g.x + g.w) as usize..width).find(|&col| !empty(col)).unwrap_or(width) as i32;
         let max_w = if block.lines == 1 { (free - MARGIN - x).max(w) } else { w };
         let (bg, fg) = (colorref(g.bg), colorref(g.fg));
-        Self { x, y, w, max_w, h, em: block.em, bg, fg, bold: g.bold(), backdrop: None, text, source: block.text.clone(), px: 0, text_h: 0 }
+        Self { x, y, w, max_w, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, text_h: 0 }
     }
 
     /// On a still picture the text goes without the picture going with it. A video would move on
@@ -676,7 +699,7 @@ mod tests {
         paint(&mut img, 300, (10, 10, 61, 30), BLACK, 3);
         paint(&mut img, 300, (200, 0, 201, 40), BLACK, 1); // a thin rule further along
         let g = glyphs(&img, 300, 40, (5, 5, 100, 30), Some("word")).unwrap();
-        let mut one = Block { glyphs: g, lines: 1, em: 20, text: "x".into() };
+        let mut one = Block { glyphs: g, lines: 1, em: 20, bold: false, text: "x".into() };
         assert_eq!(Patch::new(&img, 300, 40, &one, "訳".into()).max_w, 190);
         one.lines = 2;
         let p = Patch::new(&img, 300, 40, &one, "訳".into());
@@ -688,7 +711,7 @@ mod tests {
         let mut img = canvas(100, 50, WHITE);
         paint(&mut img, 100, (0, 10, 40, 20), BLACK, 3);
         let g = glyphs(&img, 100, 50, (-10, 0, 60, 30), Some("word")).unwrap();
-        let p = Patch::new(&img, 100, 50, &Block { glyphs: g, lines: 1, em: 10, text: "x".into() }, "訳".into());
+        let p = Patch::new(&img, 100, 50, &Block { glyphs: g, lines: 1, em: 10, bold: false, text: "x".into() }, "訳".into());
         assert_eq!(p.x, 0);
     }
 
@@ -710,7 +733,7 @@ mod tests {
 
     fn on_white(img: &[u8], width: usize, height: usize) -> Patch {
         let g = glyphs(img, width, height, (0, 0, width as i32, height as i32), None).unwrap();
-        Patch::new(img, width, height, &Block { glyphs: g, lines: 1, em: 12, text: "x".into() }, "訳".into())
+        Patch::new(img, width, height, &Block { glyphs: g, lines: 1, em: 12, bold: false, text: "x".into() }, "訳".into())
     }
 
     #[test]
