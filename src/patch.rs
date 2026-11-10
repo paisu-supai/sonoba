@@ -31,6 +31,7 @@ pub struct Glyphs {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    pub letters: i32, // the height of the letters themselves: less than `h` when a glow or outline surrounds them
     pub bg: [i32; 3],
     pub fg: [i32; 3],
     pub stem: usize, // median width of a stretch of ink: most rows cross vertical stems
@@ -76,6 +77,7 @@ pub struct Patch {
     pub text: String,
     pub source: String, // what OCR read
     pub px: i32,     // font size, set when laid out on the UI thread
+    pub narrow: i32, // letter width in percent of the font's own, ditto
     pub text_h: i32, // measured height, ditto
 }
 
@@ -117,11 +119,13 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     let [n, b, g, r] = *bins.values().max_by_key(|bin| bin[0])?;
     let mut bg = [(b / n) as i32, (g / n) as i32, (r / n) as i32];
     // A picture has no common colour, so the letters of a thick subtitle can come first. The
-    // box reaches past the text, so its two ends are the background then.
-    let picture = n * 2 < (middle.len() * (x1 - x0)) as u64;
+    // box reaches past the text, so its two ends are the background then. Bold letters packed
+    // tight can outnumber a flat background too, but then the ends are all that colour.
+    let ends: Vec<usize> = (x0..x1).take(EDGE_COLUMNS).chain((x0..x1).rev().take(EDGE_COLUMNS)).collect();
+    let around: Vec<[i32; 3]> = middle.clone().flat_map(|row| ends.iter().map(move |&col| (col, row))).map(|(col, row)| pixel(bgra, width, col, row)).collect();
+    let flat_ends = around.iter().filter(|&&p| distance(p, bg) <= GLYPH_DISTANCE).count() * 10 >= around.len() * 9;
+    let picture = n * 2 < (middle.len() * (x1 - x0)) as u64 && !flat_ends;
     if picture {
-        let ends: Vec<usize> = (x0..x1).take(EDGE_COLUMNS).chain((x0..x1).rev().take(EDGE_COLUMNS)).collect();
-        let around: Vec<[i32; 3]> = middle.clone().flat_map(|row| ends.iter().map(move |&col| (col, row))).map(|(col, row)| pixel(bgra, width, col, row)).collect();
         bg = [0, 1, 2].map(|c| around.iter().map(|p| p[c]).sum::<i32>() / around.len().max(1) as i32);
     }
     let is_ink = |col: usize, row: usize| distance(pixel(bgra, width, col, row), bg) > GLYPH_DISTANCE;
@@ -254,27 +258,64 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     if right < left {
         return None;
     }
+    // Letters with a glow or an outline, as games draw them: the halo is far from the background
+    // too, but nearer to it than to the letters. The letters alone give the size and the stems.
+    let h = (bottom - top) as i32;
+    let letter = |col: usize, row: usize| {
+        let p = pixel(bgra, width, col, row);
+        distance(p, fg) < distance(p, bg)
+    };
+    let rows: Vec<usize> = (top..bottom).filter(|&row| cols.iter().any(|&col| letter(col, row))).collect();
+    let letters = rows.last().map_or(0, |last| last + 1 - rows[0]) as i32;
+    let glow = letters > 0 && letters * 8 < h * 7;
+    if glow {
+        runs = [0; 32];
+        for row in top..bottom {
+            let mut run = 0;
+            for &col in &cols {
+                if letter(col, row) {
+                    run += 1;
+                } else if run > 0 {
+                    runs[run.min(31)] += 1;
+                    run = 0;
+                }
+            }
+        }
+    }
     let half = runs.iter().sum::<u32>() / 2;
     let mut seen = 0;
     let stem = runs.iter().position(|&n| { seen += n; seen > half }).unwrap_or(0);
     let (x, y) = (left as i32, top as i32);
-    Some(Glyphs { x, y, w: right as i32 + 1 - x, h: (bottom - top) as i32, bg, fg, stem, icon, picture })
+    Some(Glyphs { x, y, w: right as i32 + 1 - x, h, letters: if glow { letters } else { h }, bg, fg, stem, icon, picture })
 }
 
-/// The detector box cut at blank gaps nearly as wide as the letters are tall, wider than any
-/// space between words: a menu bar or the cells of a table, read as one line, are each their own
-/// label. Each piece reaches halfway into the gaps on either side.
+/// The detector box cut at blank gaps nearly as wide as the letters are tall and well over the
+/// line's usual space between words: a menu bar or the cells of a table, read as one line, are
+/// each their own label. A monospaced comma and space come close to the first test, so the second
+/// keeps prose whole. Each piece reaches halfway into the gaps on either side. A glow around the
+/// letters counts as blank.
 pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32)) -> Vec<(i32, i32, i32, i32)> {
     let Some(g) = glyphs(bgra, width, height, rect, None) else { return vec![rect] };
-    let inked = |col: i32| (g.y..g.y + g.h).any(|row| distance(pixel(bgra, width, col as usize, row as usize), g.bg) > GLYPH_DISTANCE);
-    let (mut cuts, mut blank_from) = (Vec::new(), None);
+    // Without a glow, a thin stem's few pixels can sit nearer the background than the ink.
+    let glow = g.letters < g.h;
+    let letter = |col: i32, row: i32| {
+        let p = pixel(bgra, width, col as usize, row as usize);
+        if glow { distance(p, g.fg) < distance(p, g.bg) } else { distance(p, g.bg) > GLYPH_DISTANCE }
+    };
+    let inked = |col: i32| (g.y..g.y + g.h).any(|row| letter(col, row));
+    let (mut gaps, mut blank_from) = (Vec::new(), None); // (start, width)
     for col in g.x..g.x + g.w {
         if !inked(col) {
             blank_from.get_or_insert(col);
-        } else if let Some(start) = blank_from.take().filter(|&start| (col - start) * 10 >= g.h * 9) {
-            cuts.push((start + col) / 2);
+        } else if let Some(start) = blank_from.take() {
+            gaps.push((start, col - start));
         }
     }
+    let wide = |w: i32| w * 10 >= g.letters * 9;
+    let mut spaces: Vec<i32> = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 >= g.letters && !wide(w)).collect();
+    spaces.sort_unstable();
+    let usual = spaces.get(spaces.len() / 2).copied().unwrap_or(0);
+    let cuts = gaps.iter().filter(|&&(_, w)| wide(w) && w * 10 >= usual * 18).map(|&(start, w)| start + w / 2);
     let (x, y, w, h) = rect;
     let edges: Vec<i32> = std::iter::once(x).chain(cuts).chain(std::iter::once(x + w)).collect();
     edges.windows(2).map(|e| (e[0], y, e[1] - e[0], h)).collect()
@@ -350,7 +391,7 @@ impl Patch {
         let free = ((g.x + g.w) as usize..width).find(|&col| !empty(col)).unwrap_or(width) as i32;
         let max_w = if block.lines == 1 { (free - MARGIN - x).max(w) } else { w };
         let (bg, fg) = (colorref(g.bg), colorref(g.fg));
-        Self { x, y, w, max_w, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, text_h: 0 }
+        Self { x, y, w, max_w, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
     }
 
     /// On a still picture the text goes without the picture going with it. A video would move on
@@ -470,6 +511,7 @@ impl Patch {
             text: text.to_string(),
             source: String::new(),
             px: 0,
+            narrow: 100,
             text_h: 0,
         }
     }
@@ -724,7 +766,7 @@ mod tests {
 
     #[test]
     fn style_separates_a_code_block_from_the_page() {
-        let at = |bg, fg| Glyphs { x: 0, y: 0, w: 1, h: 1, bg, fg, stem: 1, icon: false, picture: false };
+        let at = |bg, fg| Glyphs { x: 0, y: 0, w: 1, h: 1, letters: 1, bg, fg, stem: 1, icon: false, picture: false };
         let page = at([0, 0, 0], [236, 236, 236]);
         assert!(page.same_style(&at([1, 0, 0], [220, 230, 236])));
         assert!(!page.same_style(&at([35, 31, 27], [236, 236, 236])));

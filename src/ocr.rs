@@ -73,6 +73,7 @@ const REC_MAX_WIDTH: usize = 3200;
 const TEXT_SCORE: f32 = 0.5;
 const SURE_SCORE: f32 = 0.93; // a line read this well is in a script PP-OCRv6 knows, and needs no second look
 const OTHER_SCORE: f32 = 0.8; // a reading by another script's model this sure is no guess, even if it is mostly English
+const ROOMY_SCORE: f32 = 0.97; // below this, a line with an accented letter is read again with more room
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
@@ -233,11 +234,22 @@ impl Ocr {
     }
 
     fn recognize(&self, img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<String, String> {
-        let (_, _, bw, bh) = rect;
+        let (x, y, bw, bh) = rect;
         if bw == 0 || bh == 0 {
             return Ok(String::new());
         }
-        let (text, score) = self.read_with(&self.rec, &self.chars, img, rect)?;
+        let (mut text, mut score) = self.read_with(&self.rec, &self.chars, img, rect)?;
+        // An ascender close under the box's edge can read as an accent, "Online" as "Oníine". A
+        // little more room above and below settles it, and the surer reading wins.
+        let accented = |c: char| ('\u{C0}'..='\u{24F}').contains(&c) && c.is_alphabetic();
+        if score < ROOMY_SCORE && text.chars().any(accented) {
+            let room = bh / 6;
+            let roomy = (x, y.saturating_sub(room), bw, (bh + room * 2).min(img.h - y.saturating_sub(room)));
+            let (again, again_score) = self.read_with(&self.rec, &self.chars, img, roomy)?;
+            if again_score > score {
+                (text, score) = (again, again_score);
+            }
+        }
         // Other scripts read badly in the main model, so doubt is what sends a line to their
         // models. It drops the letters it has no class for and can be sure of the full stop it
         // keeps, so a reading far too short for the line is doubt too.
@@ -386,7 +398,7 @@ fn same_row(a: &Glyphs, b: &Glyphs) -> bool {
 /// text uses: "same" fills only the x-height, "Sign" also reaches up and down.
 fn font_size(ink_h: i32, text: &str) -> f32 {
     let tall = text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit() || "bdfhiklt".contains(c) || !c.is_ascii());
-    let deep = text.chars().any(|c| "gjpqy,;()".contains(c) || !c.is_ascii());
+    let deep = text.chars().any(|c| "gjpqyQ,;()".contains(c) || !c.is_ascii());
     ink_h as f32 / (if tall { 0.72 } else { 0.52 } + if deep { 0.21 } else { 0.0 })
 }
 
@@ -400,20 +412,26 @@ pub struct Block {
     pub text: String,
 }
 
-/// Joins wrapped lines so each paragraph reaches the translator as a whole sentence.
+/// Joins wrapped lines so each paragraph reaches the translator as a whole sentence. Columns side
+/// by side take turns in reading order, row by row, so the paragraph a line carries on is one of
+/// the last few, not always the last.
 pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
+    const COLUMNS: usize = 8; // the most paragraphs a row can run across
     let mut out: Vec<Block> = Vec::new();
-    let mut prev: Option<&Line> = None;
-    let mut em_sum = 0.0;
+    let mut ends: Vec<(&Line, f32)> = Vec::new(); // each paragraph's last line, and its lines' sizes added up
     for (i, line) in lines.iter().enumerate() {
-        let (g, em) = (&line.glyphs, font_size(line.glyphs.h, &line.text));
+        let (g, em) = (&line.glyphs, font_size(line.glyphs.letters, &line.text));
         // How far the lines around reach: a wrapped line nearly does, a chat message rarely.
         let around = |a: &Line| {
             let near = &lines[i.saturating_sub(3)..(i + 3).min(lines.len())];
             near.iter().map(|n| &n.glyphs).filter(|n| (a.glyphs.h - n.h).abs() * 3 <= a.glyphs.h.max(n.h) && (a.glyphs.x + a.glyphs.w).min(n.x + n.w) > a.glyphs.x.max(n.x)).map(|n| n.x + n.w).max().unwrap_or(0)
         };
-        match out.last_mut().filter(|b| prev.is_some_and(|a| continues(a, line, b.glyphs.x + b.glyphs.w, around(a)))) {
-            Some(block) => {
+        let found = (out.len().saturating_sub(COLUMNS)..out.len())
+            .rev()
+            .find(|&k| continues(ends[k].0, line, out[k].glyphs.x + out[k].glyphs.w, around(ends[k].0)));
+        match found {
+            Some(k) => {
+                let block = &mut out[k];
                 let hyphen = block.text.ends_with('-') && line.text.starts_with(|c: char| c.is_lowercase());
                 if hyphen {
                     block.text.pop();
@@ -427,15 +445,14 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
                 (b.x, b.y) = (b.x.min(g.x), b.y.min(g.y));
                 (b.w, b.h) = (right - b.x, bottom - b.y);
                 block.lines += 1;
-                em_sum += em;
-                block.em = (em_sum / block.lines as f32).round() as i32;
+                ends[k] = (line, ends[k].1 + em);
+                block.em = (ends[k].1 / block.lines as f32).round() as i32;
             }
             None => {
-                em_sum = em;
                 out.push(Block { glyphs: *g, lines: 1, em: em.round() as i32, bold: g.bold(), text: line.text.clone() });
+                ends.push((line, em));
             }
         }
-        prev = Some(line);
     }
     match_rows(&mut out);
     out
@@ -445,30 +462,40 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
 /// and weight. Each is measured on its own, and a short word gives a poor measure: which letters
 /// it has decides how much of the size its ink shows. The middle size and the commoner weight win.
 /// Their tops line up and their bottoms nearly do, letters below the line aside; a heading beside
-/// body text does neither.
+/// body text does neither. Over a picture the background varies from label to label, and a
+/// highlighted item differs in colour only. Neighbours chain into one row. A size more than twice
+/// or half the middle one is other text that happens to line up.
 fn match_rows(blocks: &mut [Block]) {
     let alike = |a: &Block, b: &Block| {
         let (ga, gb) = (&a.glyphs, &b.glyphs);
         let h = ga.h.max(gb.h);
         let aligned = (ga.y - gb.y).abs() * 4 <= h && (ga.y + ga.h - gb.y - gb.h).abs() * 3 <= h;
-        let colours = ga.same_style(gb) || (ga.picture && gb.picture && ga.same_fg(gb));
-        b.lines == 1 && aligned && colours && a.em.max(b.em) * 2 <= a.em.min(b.em) * 3
+        let colours = ga.same_style(gb) || (ga.picture && gb.picture) || ((ga.picture || gb.picture) && ga.same_fg(gb));
+        a.lines == 1 && b.lines == 1 && aligned && colours
     };
-    let settled: Vec<(i32, bool)> = blocks
-        .iter()
-        .map(|a| {
-            let row: Vec<&Block> = blocks.iter().filter(|b| a.lines == 1 && alike(a, b)).collect();
-            if row.len() < 2 {
-                return (a.em, a.bold);
+    let mut row: Vec<usize> = (0..blocks.len()).collect(); // each block's row, named by one of its blocks
+    for i in 0..blocks.len() {
+        for j in i + 1..blocks.len() {
+            if row[i] != row[j] && alike(&blocks[i], &blocks[j]) {
+                let (keep, gone) = (row[i], row[j]);
+                row.iter_mut().filter(|r| **r == gone).for_each(|r| *r = keep);
             }
-            let mut ems: Vec<i32> = row.iter().map(|b| b.em).collect();
-            ems.sort_unstable();
-            let bold = row.iter().filter(|b| b.bold).count() * 2 >= row.len();
-            (ems[ems.len() / 2], bold)
-        })
-        .collect();
-    for (block, (em, bold)) in blocks.iter_mut().zip(settled) {
-        (block.em, block.bold) = (em, bold);
+        }
+    }
+    for name in 0..blocks.len() {
+        let members: Vec<usize> = (0..blocks.len()).filter(|&i| row[i] == name).collect();
+        if members.len() < 2 {
+            continue;
+        }
+        let mut ems: Vec<i32> = members.iter().map(|&i| blocks[i].em).collect();
+        ems.sort_unstable();
+        let middle = ems[ems.len() / 2];
+        let bold = members.iter().filter(|&&i| blocks[i].bold).count() * 2 >= members.len();
+        for i in members {
+            if blocks[i].em.max(middle) <= blocks[i].em.min(middle) * 2 {
+                (blocks[i].em, blocks[i].bold) = (middle, bold);
+            }
+        }
     }
 }
 
@@ -535,11 +562,26 @@ mod tests {
     use super::*;
 
     fn at(x: i32, y: i32, w: i32, h: i32, text: &str) -> Line {
-        Line { glyphs: Glyphs { x, y, w, h, bg: [0; 3], fg: [255; 3], stem: 2, icon: false, picture: false }, text: text.into() }
+        Line { glyphs: Glyphs { x, y, w, h, letters: h, bg: [0; 3], fg: [255; 3], stem: 2, icon: false, picture: false }, text: text.into() }
     }
 
     fn l(x: i32, y: i32, w: i32, text: &str) -> Line {
         at(x, y, w, 18, text)
+    }
+
+    /// Reading order takes the two columns' lines in turn, row by row.
+    #[test]
+    fn columns_side_by_side_each_make_a_paragraph() {
+        let lines = [
+            l(0, 0, 200, "Create standalone project"),
+            l(300, 0, 200, "Project Online PWA data is"),
+            l(0, 24, 210, "files, or connect to share"),
+            l(300, 24, 190, "saved to the SharePoint"),
+            l(0, 48, 120, "your projects."),
+            l(300, 48, 140, "content database."),
+        ];
+        let got: Vec<String> = paragraphs(&lines).into_iter().map(|b| b.text).collect();
+        assert_eq!(got, ["Create standalone project files, or connect to share your projects.", "Project Online PWA data is saved to the SharePoint content database."]);
     }
 
     #[test]
@@ -743,7 +785,7 @@ mod tests {
     #[test]
     fn labels_in_a_row_share_size_and_weight() {
         let block = |x, (y, h), em, bold, fg| {
-            let glyphs = Glyphs { x, y, w: 40, h, bg: [40, 120, 40], fg, stem: 1, icon: false, picture: false };
+            let glyphs = Glyphs { x, y, w: 40, h, letters: h, bg: [40, 120, 40], fg, stem: 1, icon: false, picture: false };
             Block { glyphs, lines: 1, em, bold, text: "x".into() }
         };
         let (white, black, label, heading) = ([255; 3], [0; 3], (0, 14), (-6, 22));
@@ -780,7 +822,7 @@ mod tests {
 
     #[test]
     fn wrapped_japanese_takes_no_space() {
-        let line = |y: i32, text: &str| Line { glyphs: Glyphs { x: 0, y, w: 400, h: 20, bg: [255; 3], fg: [0; 3], stem: 2, icon: false, picture: false }, text: text.to_string() };
+        let line = |y: i32, text: &str| Line { glyphs: Glyphs { x: 0, y, w: 400, h: 20, letters: 20, bg: [255; 3], fg: [0; 3], stem: 2, icon: false, picture: false }, text: text.to_string() };
         let blocks = paragraphs(&[line(0, "取扱説明書をよく読んで、"), line(26, "正しく使ってください。")]);
         assert_eq!(blocks[0].text, "取扱説明書をよく読んで、正しく使ってください。");
     }
