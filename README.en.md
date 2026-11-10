@@ -34,7 +34,7 @@ Since this is a downloaded file, you may encounter a SmartScreen warning upon th
 
 You can change the keys in the settings. The middle and side mouse buttons can also be assigned. Each key can be reverted to its default or disabled. Hotkeys are only disabled while a key is selected in the settings screen.
 
-Select a region by dragging. While dragging, a green line appears outside the region. Clicking without dragging selects the entire window within a white frame. You can undo the selection by pressing Esc or right-clicking. Once undone, the previous translation will continue.
+Select a region by dragging. While dragging, a green line appears outside the region. Clicking without dragging selects the entire window within a white frame. You can undo the selection by pressing Esc or right-clicking outside the regions. Once undone, the previous translation will continue. While you select, the regions being translated show a green line even when "Green border" is off in the settings. Right-click inside one to remove just that region; the selection stays open so you can keep choosing.
 
 While selecting a region, a bar appears at the top of the screen. You can toggle the source, target, and live settings on or off here.
 

@@ -827,7 +827,9 @@ pub fn update_frame() {
         let frame = ui.frame.get();
         let config = config::get();
         let flashing = ui.flashing.get();
-        let wanted = ui.job_id.get() != 0 && !PAUSED.load(Ordering::Relaxed) && (config.show_frame || flashing);
+        // While choosing regions the ones already there show, frame or no frame in the settings.
+        let selecting = !ui.select.get().is_null();
+        let wanted = ui.job_id.get() != 0 && !PAUSED.load(Ordering::Relaxed) && (config.show_frame || flashing || selecting);
         let region = ui.region.get();
         if !wanted || region.w <= 0 || region.h <= 0 {
             ShowWindow(frame, SW_HIDE);
@@ -1038,6 +1040,7 @@ unsafe fn begin_select(live: bool) {
         ShowWindow(select, SW_SHOWNOACTIVATE);
         update_hover(select);
         bar::show(live, ui.job_id.get() != 0);
+        update_frame(); // over the layer, where it is not dimmed
     });
 }
 
@@ -1123,10 +1126,44 @@ unsafe fn end_select() {
             ReleaseCapture();
             DestroyWindow(select);
             bar::hide();
+            update_frame();
         }
         ui.selecting.set(None);
         place_line(ui.line.get(), None);
     });
+}
+
+/// A right-click inside a region takes that region away, and the layer stays for choosing more.
+/// False when no region is there.
+fn remove_region_at(x: i32, y: i32) -> bool {
+    UI.with(|ui| {
+        if ui.job_id.get() == 0 {
+            return false;
+        }
+        let inside = |r: Region| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+        let mut parts = PARTS.lock().unwrap().clone();
+        if parts.is_empty() {
+            if !inside(ui.region.get()) {
+                return false;
+            }
+            stop();
+        } else {
+            let Some(i) = parts.iter().rposition(|p| inside(p.region)) else { return false }; // the last added is on top
+            parts.remove(i);
+            ui.anchor.set(None);
+            if let [last] = parts[..] {
+                PARTS.lock().unwrap().clear();
+                start_job(last.region, last.live);
+            } else {
+                let live = parts.iter().any(|p| p.live);
+                let around = around_all(&parts);
+                *PARTS.lock().unwrap() = parts;
+                start_job(around, live);
+            }
+        }
+        bar::set_running(ui.job_id.get() != 0);
+        true
+    })
 }
 
 fn selection_rect(from: (i32, i32), to: (i32, i32)) -> RECT {
@@ -1318,7 +1355,12 @@ unsafe extern "system" fn select_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             // On the way up: the layer gone, the release would open the menu of the app below.
             WM_RBUTTONUP => {
-                end_select();
+                let (x, y) = lparam_xy(l);
+                let mut origin = POINT { x: 0, y: 0 };
+                ClientToScreen(hwnd, &mut origin);
+                if !remove_region_at(x + origin.x, y + origin.y) {
+                    end_select();
+                }
                 0
             }
             _ => DefWindowProcW(hwnd, msg, w, l),
