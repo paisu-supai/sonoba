@@ -74,6 +74,7 @@ const TEXT_SCORE: f32 = 0.5;
 const SURE_SCORE: f32 = 0.93; // a line read this well is in a script PP-OCRv6 knows, and needs no second look
 const OTHER_SCORE: f32 = 0.8; // a reading by another script's model this sure is no guess, even if it is mostly English
 const ROOMY_SCORE: f32 = 0.97; // below this, a line with an accented letter is read again with more room
+const ROW_GAP: i32 = 8; // labels in a row stand at most this many line heights apart
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
@@ -418,7 +419,7 @@ pub struct Block {
 pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
     const COLUMNS: usize = 8; // the most paragraphs a row can run across
     let mut out: Vec<Block> = Vec::new();
-    let mut ends: Vec<(&Line, f32)> = Vec::new(); // each paragraph's last line, and its lines' sizes added up
+    let mut ends: Vec<(&Line, f32, usize)> = Vec::new(); // each paragraph's last line, its lines' sizes added up, its bold lines
     for (i, line) in lines.iter().enumerate() {
         let (g, em) = (&line.glyphs, font_size(line.glyphs.letters, &line.text));
         // How far the lines around reach: a wrapped line nearly does, a chat message rarely.
@@ -445,12 +446,13 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
                 (b.x, b.y) = (b.x.min(g.x), b.y.min(g.y));
                 (b.w, b.h) = (right - b.x, bottom - b.y);
                 block.lines += 1;
-                ends[k] = (line, ends[k].1 + em);
+                ends[k] = (line, ends[k].1 + em, ends[k].2 + g.bold() as usize);
                 block.em = (ends[k].1 / block.lines as f32).round() as i32;
+                block.bold = ends[k].2 * 2 > block.lines as usize; // a bold heading run into its body leaves it regular
             }
             None => {
                 out.push(Block { glyphs: *g, lines: 1, em: em.round() as i32, bold: g.bold(), text: line.text.clone() });
-                ends.push((line, em));
+                ends.push((line, em, g.bold() as usize));
             }
         }
     }
@@ -464,14 +466,16 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
 /// Their tops line up and their bottoms nearly do, letters below the line aside; a heading beside
 /// body text does neither. Over a picture the background varies from label to label, and a
 /// highlighted item differs in colour only. Neighbours chain into one row. A size more than twice
-/// or half the middle one is other text that happens to line up.
+/// or half the middle one is other text that happens to line up, and a row stops at a gap far
+/// wider than the letters are tall, where another column begins. Half bold leaves each as it was.
 fn match_rows(blocks: &mut [Block]) {
     let alike = |a: &Block, b: &Block| {
         let (ga, gb) = (&a.glyphs, &b.glyphs);
         let h = ga.h.max(gb.h);
         let aligned = (ga.y - gb.y).abs() * 4 <= h && (ga.y + ga.h - gb.y - gb.h).abs() * 3 <= h;
+        let gap = (ga.x.max(gb.x) - (ga.x + ga.w).min(gb.x + gb.w)).max(0);
         let colours = ga.same_style(gb) || (ga.picture && gb.picture) || ((ga.picture || gb.picture) && ga.same_fg(gb));
-        a.lines == 1 && b.lines == 1 && aligned && colours
+        a.lines == 1 && b.lines == 1 && aligned && colours && gap <= h * ROW_GAP
     };
     let mut row: Vec<usize> = (0..blocks.len()).collect(); // each block's row, named by one of its blocks
     for i in 0..blocks.len() {
@@ -490,10 +494,13 @@ fn match_rows(blocks: &mut [Block]) {
         let mut ems: Vec<i32> = members.iter().map(|&i| blocks[i].em).collect();
         ems.sort_unstable();
         let middle = ems[ems.len() / 2];
-        let bold = members.iter().filter(|&&i| blocks[i].bold).count() * 2 >= members.len();
+        let (bolds, all) = (members.iter().filter(|&&i| blocks[i].bold).count() * 2, members.len());
         for i in members {
             if blocks[i].em.max(middle) <= blocks[i].em.min(middle) * 2 {
-                (blocks[i].em, blocks[i].bold) = (middle, bold);
+                blocks[i].em = middle;
+                if bolds != all {
+                    blocks[i].bold = bolds > all;
+                }
             }
         }
     }
@@ -878,3 +885,4 @@ mod tests {
         assert_eq!(text_of(&ocr, "ui-14px"), text_of(&Ocr::new(4, &[]).unwrap(), "ui-14px"));
     }
 }
+

@@ -18,7 +18,7 @@ const SMOOTHING: usize = 4; // passes over a painted-out letter, so that no outl
 const SAME_BG: i32 = 30;
 const SAME_FG: i32 = 80; // thin text rarely reaches its true colour, so allow for that
 const BOLD_STEM: usize = 8; // a stem wider than 1/8 of the line height, less one antialiased pixel
-const MIN_BOLD_LINE: i32 = 16; // small text is all antialiasing, so weight cannot be told
+const MIN_BOLD_STEM: usize = 4; // a regular stem in small text is one pixel and its two antialiased edges
 const STATUS_BG: u32 = 0x00201C1C;
 const STATUS_FG: u32 = 0x00F5F5F5;
 const MOVED_TENTHS: usize = 9; // of a patch's rows found again where it moved to
@@ -41,7 +41,7 @@ pub struct Glyphs {
 
 impl Glyphs {
     pub fn bold(&self) -> bool {
-        self.h >= MIN_BOLD_LINE && self.stem.saturating_sub(1) as i32 * BOLD_STEM as i32 > self.h
+        self.stem >= MIN_BOLD_STEM && self.stem.saturating_sub(1) as i32 * BOLD_STEM as i32 > self.letters
     }
 
     /// True when two lines sit on the same background in the same ink.

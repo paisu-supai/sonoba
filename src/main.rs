@@ -1412,17 +1412,101 @@ unsafe fn font_of(px: i32, width: i32, bold: bool) -> HFONT {
     }
 }
 
-const TEXT_FLAGS: DRAW_TEXT_FORMAT = DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL;
+const TEXT_FLAGS: DRAW_TEXT_FORMAT = DT_NOPREFIX | DT_EDITCONTROL; // the lines are broken by `wrapped`
+
+/// The text cut where a line may break. Windows breaks Japanese between any two characters,
+/// "プロ/ジェクト" included; this keeps a run of katakana, of kanji, or of Latin letters whole,
+/// keeps the hiragana after a word with it (its okurigana and particles), and starts no line with
+/// closing punctuation or a small kana.
+fn pieces_to_break(text: &str) -> Vec<String> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Kind { Latin, Katakana, Kanji, Hiragana, Other }
+    let kind = |c: char| match c {
+        'ァ'..='ヺ' | 'ー' | 'ｦ'..='ﾟ' => Kind::Katakana,
+        'ぁ'..='ゖ' => Kind::Hiragana,
+        '一'..='鿿' | '々' | '〆' => Kind::Kanji,
+        c if c.is_ascii_graphic() || c.is_alphanumeric() && !c.is_ascii() && (c as u32) < 0x2000 => Kind::Latin,
+        _ => Kind::Other,
+    };
+    let no_start = |c: char| "、。，．・：；？！）」』】〕〉》｝］ー々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ…‥".contains(c);
+    let no_end = |c: char| "（「『【〔〈《｛［".contains(c);
+    let mut out: Vec<String> = Vec::new();
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        let starts = match prev {
+            None => true,
+            Some(p) if p == ' ' || p == '\n' => true,
+            Some(_) if c == ' ' || no_start(c) => false,
+            Some(p) if no_end(p) => false,
+            Some(p) if kind(c) == Kind::Hiragana => "、。，．！？".contains(p),
+            Some(p) => kind(p) != kind(c) || kind(c) == Kind::Other,
+        };
+        if starts {
+            out.push(String::new());
+        }
+        out.last_mut().unwrap().push(c);
+        prev = Some(c);
+    }
+    out
+}
+
+/// The text with a line break wherever the next piece would run past `width`, in the font on
+/// `hdc`. A piece wider than a line is cut into lines of about equal length, which tends to land
+/// between the words of a compound such as "プロジェクトロードマップ".
+unsafe fn wrapped(hdc: HDC, text: &str, width: i32) -> Vec<u16> {
+    let width_of = |s: &str| unsafe {
+        let units = wide(s.trim_end());
+        let mut size = SIZE { cx: 0, cy: 0 };
+        GetTextExtentPoint32W(hdc, units.as_ptr(), units.len() as i32, &mut size);
+        size.cx
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for piece in pieces_to_break(text) {
+        if piece.starts_with('\n') {
+            lines.push(std::mem::take(&mut line));
+            line = piece[1..].to_string();
+            continue;
+        }
+        if width_of(&format!("{line}{piece}")) <= width || line.trim().is_empty() && width_of(&piece) <= width {
+            line.push_str(&piece);
+            continue;
+        }
+        if !line.trim().is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if width_of(&piece) <= width {
+            line = piece;
+            continue;
+        }
+        let chars: Vec<char> = piece.chars().collect();
+        let parts = (width_of(&piece) + width - 1) / width.max(1);
+        let mut parts = parts.max(2) as usize;
+        let cut = loop {
+            let each = chars.len().div_ceil(parts);
+            let cut: Vec<String> = chars.chunks(each.max(1)).map(|c| c.iter().collect()).collect();
+            if parts >= chars.len() || cut.iter().all(|p| width_of(p) <= width) {
+                break cut;
+            }
+            parts += 1;
+        };
+        let (last, rest) = cut.split_last().unwrap();
+        lines.extend(rest.iter().cloned());
+        line = last.clone();
+    }
+    lines.push(line);
+    wide(&lines.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n"))
+}
 
 /// Keeps the original font size if the text fits, spreading one line over empty background
 /// first, then narrowing the letters, and shrinking only after that: a translation as tall as
 /// the labels around it reads better than a small one. Overhanging leading is empty, so it does
 /// not count, and the patch grows only when even MIN_TEXT_PX does not fit.
 unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
-    let text = wide(&patch.text);
     let measure = |px: i32, narrow: i32, width: i32| unsafe {
         let font = text_font(px, patch.bold, narrow);
         let old = SelectObject(hdc, font);
+        let text = wrapped(hdc, &patch.text, width);
         let mut rect = RECT { left: 0, top: 0, right: width, bottom: 0 };
         DrawTextW(hdc, text.as_ptr(), text.len() as i32, &mut rect, TEXT_FLAGS | DT_CALCRECT);
         SelectObject(hdc, old);
@@ -1669,7 +1753,7 @@ unsafe fn draw_patches(hdc: HDC, patches: &[Patch]) {
             let top = p.y + (p.h - p.text_h) / 2;
             // DT_EDITCONTROL drops a last line that overhangs, so the box must hold all of it.
             let area = RECT { left: p.x, top, right: p.x + p.w, bottom: top + p.text_h };
-            let text = wide(&p.text);
+            let text = wrapped(hdc, &p.text, p.w);
             let write = |dx: i32, dy: i32, color: u32| {
                 let mut at = RECT { left: area.left + dx, top: area.top + dy, right: area.right + dx, bottom: area.bottom + dy };
                 SetTextColor(hdc, color);
@@ -2354,6 +2438,16 @@ mod tests {
         let mut patches = Vec::new();
         hold_still(&mut patches, &shown, &Frame { pixels: page(&[]), w: 100, h: 20 });
         assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn japanese_breaks_between_words() {
+        let cut = |s: &str| pieces_to_break(s);
+        assert_eq!(cut("ウェブ向けプロジェクト"), ["ウェブ", "向け", "プロジェクト"]);
+        assert_eq!(cut("設定を保存してください。"), ["設定を", "保存してください。"]);
+        assert_eq!(cut("Save your work"), ["Save ", "your ", "work"]);
+        assert_eq!(cut("SharePoint コンテンツ"), ["SharePoint ", "コンテンツ"]);
+        assert_eq!(cut("ページ（project.microsoft.com）で確認、それから"), ["ページ", "（project.microsoft.com）で", "確認、", "それから"]);
     }
 
     #[test]
