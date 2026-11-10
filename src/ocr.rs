@@ -414,9 +414,11 @@ fn same_row(a: &Glyphs, b: &Glyphs) -> bool {
 /// The font size that gives a line this much ink, going by which parts of the letters the
 /// text uses: "same" fills only the x-height, "Sign" also reaches up and down.
 fn font_size(ink_h: i32, text: &str) -> f32 {
-    let tall = text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit() || "bdfhiklt".contains(c) || !c.is_ascii());
-    let deep = text.chars().any(|c| "gjpqyQ,;()".contains(c) || !c.is_ascii());
-    ink_h as f32 / (if tall { 0.72 } else { 0.52 } + if deep { 0.21 } else { 0.0 })
+    let has = |set: &str| text.chars().any(|c| set.contains(c) || !c.is_ascii());
+    let tall = has("bdfhiklt!?'\"()") || text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
+    // A comma dips below the line about half as far as a g does.
+    let deep = if has("gjpqyQ()") { 0.21 } else if has(",;") { 0.12 } else { 0.0 };
+    ink_h as f32 / (if tall { 0.72 } else { 0.52 } + deep)
 }
 
 /// One paragraph, with its lines' combined ink.
@@ -438,10 +440,13 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
     let mut ends: Vec<(&Line, f32, usize)> = Vec::new(); // each paragraph's last line, its lines' sizes added up, its bold lines
     for (i, line) in lines.iter().enumerate() {
         let (g, em) = (&line.glyphs, font_size(line.glyphs.letters, &line.text));
-        // How far the lines around reach: a wrapped line nearly does, a chat message rarely.
+        // How far the lines around reach: a wrapped line nearly does, a chat message rarely. Only
+        // lines that start or centre where it does are in its column: a game's menu bar above the
+        // dialogue may end where the dialogue does, by chance.
         let around = |a: &Line| {
-            let near = &lines[i.saturating_sub(3)..(i + 3).min(lines.len())];
-            near.iter().map(|n| &n.glyphs).filter(|n| (a.glyphs.h - n.h).abs() * 3 <= a.glyphs.h.max(n.h) && (a.glyphs.x + a.glyphs.w).min(n.x + n.w) > a.glyphs.x.max(n.x)).map(|n| n.x + n.w).max().unwrap_or(0)
+            let (a, near) = (&a.glyphs, &lines[i.saturating_sub(3)..(i + 3).min(lines.len())]);
+            let column = |n: &Glyphs| (a.x - n.x).abs() <= a.h * 3 || (a.x * 2 + a.w - n.x * 2 - n.w).abs() <= a.h * 2;
+            near.iter().map(|n| &n.glyphs).filter(|n| (a.h - n.h).abs() * 3 <= a.h.max(n.h) && column(n)).map(|n| n.x + n.w).max().unwrap_or(0)
         };
         let found = (out.len().saturating_sub(COLUMNS)..out.len())
             .rev()
@@ -541,13 +546,16 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32, around_right: i32) -
     let (a, b) = (&line_a.glyphs, &line_b.glyphs);
     let h = a.h.max(b.h);
     let gap = b.y - (a.y + a.h);
-    let similar_height = (a.h - b.h).abs() * 3 <= h;
+    // A short last line without a tall or deep letter, or without its glow, has a lower box.
+    let (em_a, em_b) = (font_size(a.letters, &line_a.text), font_size(b.letters, &line_b.text));
+    let similar_height = (a.h - b.h).abs() * 3 <= h || (em_a - em_b).abs() * 3.0 <= em_a.max(em_b);
     let same_column = (a.x + a.w).min(b.x + b.w) > a.x.max(b.x);
     // Wrapped lines share an edge or a middle: left, with room for an indent, centred, or right.
     // A menu bar over a game's dialogue overlaps it but lines up with it in none of these.
     let lined_up = (a.x - b.x).abs() <= h * 3 || (a.x * 2 + a.w - b.x * 2 - b.w).abs() <= h * 2 || (a.x + a.w - b.x - b.w).abs() <= h;
-    // Over a picture the background differs from line to line; the letters' colour does not.
-    let alike = a.same_style(b) || (a.picture && b.picture && a.same_fg(b));
+    // Over a picture the background differs from line to line, and a short word may happen to sit
+    // on a flat stretch of it; the letters' colour does not differ.
+    let alike = a.same_style(b) || ((a.picture || b.picture) && a.same_fg(b));
     if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !alike {
         return false;
     }
@@ -603,6 +611,27 @@ mod tests {
     fn a_menu_bar_does_not_run_into_the_dialogue_below() {
         let lines = [l(530, 0, 240, "Save Q.Save Q.Load Skip"), l(0, 24, 700, "Then, why didn't you use your hiding skills to hide from the guards?")];
         assert_eq!(paragraphs(&lines).len(), 2);
+    }
+
+    /// A game's dialogue: the menu bar above happens to end where the dialogue does, and the last
+    /// line, one short word with no glow found round it, has a lower box and sits on a flat
+    /// stretch of the picture.
+    #[test]
+    fn a_dialogue_keeps_its_short_last_line() {
+        let over_picture = |mut l: Line| {
+            (l.glyphs.letters, l.glyphs.bg, l.glyphs.picture) = (21, [60, 45, 52], true);
+            l
+        };
+        let mut last = at(2, 123, 90, 18, "country.");
+        last.glyphs.bg = [33, 20, 33];
+        let lines = [
+            over_picture(at(666, 4, 188, 32, "Q.Load Skip Auto")),
+            over_picture(at(0, 52, 826, 32, "To explain it in a way you'd understand: an athlete is someone who practices")),
+            over_picture(at(0, 84, 822, 32, "a certain sport, and those who are among the best end up representing their")),
+            last,
+        ];
+        let got: Vec<String> = paragraphs(&lines).into_iter().map(|b| b.text).collect();
+        assert_eq!(got[1..], ["To explain it in a way you'd understand: an athlete is someone who practices a certain sport, and those who are among the best end up representing their country."]);
     }
 
     /// Reading order takes the two columns' lines in turn, row by row.
@@ -674,6 +703,11 @@ mod tests {
         assert_eq!(font_size(14, "Sign in").round(), 15.0);
         assert_eq!(font_size(11, "HELLO").round(), 15.0);
         assert_eq!(font_size(8, "same").round(), 15.0);
+        // A game's 23 px dialogue: lines without a g or y, and a short last line.
+        assert_eq!(font_size(19, "No need to look for me, Taka-kun.").round(), 23.0);
+        assert_eq!(font_size(19, "What am I, then?").round(), 23.0);
+        assert_eq!(font_size(21, "person!").round(), 23.0);
+        assert_eq!(font_size(21, "Did you sleep well?").round(), 23.0);
     }
 
     #[test]

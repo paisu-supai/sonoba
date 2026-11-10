@@ -1508,8 +1508,9 @@ unsafe fn wrapped(hdc: HDC, text: &str, width: i32) -> Vec<u16> {
 
 /// Keeps the original font size if the text fits, spreading one line over empty background
 /// first, then narrowing the letters, and shrinking only after that: a translation as tall as
-/// the labels around it reads better than a small one. Overhanging leading is empty, so it does
-/// not count, and the patch grows only when even MIN_TEXT_PX does not fit.
+/// the labels around it reads better than a small one. A one-line original stays on one line
+/// if narrowing can keep it there. Overhanging leading is empty, so it does not count, and the
+/// patch grows only when even MIN_TEXT_PX does not fit.
 unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
     let measure = |px: i32, narrow: i32, width: i32| unsafe {
         let font = text_font(px, patch.bold, narrow);
@@ -1527,14 +1528,18 @@ unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
     let narrows: &[i32] = if status { &[100] } else { &NARROWS };
     let (size, width, narrow) = 'fit: loop {
         let room = patch.h + px / 2;
-        for &narrow in narrows {
-            let normal = measure(px, narrow, patch.w);
-            if normal.bottom <= room {
-                break 'fit (normal, patch.w, narrow);
-            }
-            let spread = measure(px, narrow, patch.max_w);
-            if spread.bottom <= room {
-                break 'fit (spread, patch.w.max(spread.right + 1), narrow);
+        // A label's glow can leave room for two lines; it narrows before it wraps.
+        let line = if patch.one_line { measure(px, 100, 1 << 20).bottom.min(room) } else { room };
+        for limit in [line, room] {
+            for &narrow in narrows {
+                let normal = measure(px, narrow, patch.w);
+                if normal.bottom <= limit {
+                    break 'fit (normal, patch.w, narrow);
+                }
+                let spread = measure(px, narrow, patch.max_w);
+                if spread.bottom <= limit {
+                    break 'fit (spread, patch.w.max(spread.right + 1), narrow);
+                }
             }
         }
         if status || px <= smallest {
@@ -2466,55 +2471,79 @@ mod tests {
         assert!(patches.is_empty());
     }
 
+    /// A game's menu item has a glow, so its box leaves room for two lines of its own size.
+    #[test]
+    fn a_one_line_label_narrows_before_it_wraps() {
+        let label = |one_line| Patch { w: 69, h: 36, em: 15, one_line, text: "Q.読み込み".into(), ..Patch::status("", 69) };
+        let (mut one, mut many) = (label(true), label(false));
+        unsafe {
+            let mem = CreateCompatibleDC(null_mut());
+            fit(mem, &mut one, STATUS_PX);
+            fit(mem, &mut many, STATUS_PX);
+            DeleteDC(mem);
+        }
+        assert!(many.narrow == 100 && many.text_h > one.text_h, "the test needs a label that wraps: {many:?}");
+        assert!(one.narrow < 100 && one.px == 15, "{one:?}");
+    }
+
     /// Draws the overlay onto a picture, to judge a layout without touching the real screen:
     /// RENDER_IN=in.png RENDER_OUT=out.png cargo test render_picture -- --ignored --nocapture
+    /// With folders for RENDER_IN and RENDER_OUT, every picture in the first is drawn into the second.
     #[test]
     #[ignore = "needs Ollama and a picture"]
     fn render_picture() {
         let (input, output) = (std::env::var("RENDER_IN").unwrap(), std::env::var("RENDER_OUT").unwrap());
-        let (mut bgra, w, h) = ocr::png_bgra(&input);
-        let region = Region { x: 0, y: 0, w: w as i32, h: h as i32 };
         let live = std::env::var("RENDER_LIVE").is_ok(); // live jobs keep the flat box
-        let job = Job { region, live, id: 1, window: 0 };
-        set_job(Some(job));
-        let frame = Frame { pixels: bgra.clone(), w, h };
         let (mut models, mut translator) = (None, translate::Translator::new());
-        let keep_going = || true;
-        let shared = new_shared();
-        *shared.latest.lock().unwrap() = bgra.clone(); // a still screen: nothing has moved since
-        let start = Instant::now();
-        let mut patches = translate_frame(&frame, live, &mut models, &mut translator, &keep_going, &|_| {}, &shared).unwrap();
-        println!("first pass {:?}", start.elapsed());
-        let start = Instant::now();
-        translate_frame(&frame, live, &mut models, &mut translator, &keep_going, &|_| {}, &shared).unwrap();
-        println!("second pass, translations cached {:?}", start.elapsed());
-        unsafe {
-            let mem = CreateCompatibleDC(null_mut());
-            let mut info: BITMAPINFO = std::mem::zeroed();
-            info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-            info.bmiHeader.biWidth = w as i32;
-            info.bmiHeader.biHeight = -(h as i32);
-            info.bmiHeader.biPlanes = 1;
-            info.bmiHeader.biBitCount = 32;
-            let mut bits = null_mut();
-            let dib = CreateDIBSection(mem, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-            SelectObject(mem, dib);
-            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
-            for patch in &mut patches {
-                fit(mem, patch, STATUS_PX);
+        let pairs: Vec<(std::path::PathBuf, std::path::PathBuf)> = if std::path::Path::new(&input).is_dir() {
+            let mut files: Vec<_> = std::fs::read_dir(&input).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+            files.sort();
+            files.into_iter().map(|f| (f.clone(), std::path::Path::new(&output).join(f.file_name().unwrap()))).collect()
+        } else {
+            vec![(input.into(), output.into())]
+        };
+        for (input, output) in pairs {
+            println!("== {}", input.display());
+            let (mut bgra, w, h) = ocr::png_bgra(input.to_str().unwrap());
+            let region = Region { x: 0, y: 0, w: w as i32, h: h as i32 };
+            set_job(Some(Job { region, live, id: 1, window: 0 }));
+            let frame = Frame { pixels: bgra.clone(), w, h };
+            let keep_going = || true;
+            let shared = new_shared();
+            *shared.latest.lock().unwrap() = bgra.clone(); // a still screen: nothing has moved since
+            let start = Instant::now();
+            let mut patches = translate_frame(&frame, live, &mut models, &mut translator, &keep_going, &|_| {}, &shared).unwrap();
+            println!("first pass {:?}", start.elapsed());
+            unsafe {
+                let mem = CreateCompatibleDC(null_mut());
+                let mut info: BITMAPINFO = std::mem::zeroed();
+                info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+                info.bmiHeader.biWidth = w as i32;
+                info.bmiHeader.biHeight = -(h as i32);
+                info.bmiHeader.biPlanes = 1;
+                info.bmiHeader.biBitCount = 32;
+                let mut bits = null_mut();
+                let dib = CreateDIBSection(mem, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+                SelectObject(mem, dib);
+                std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+                for patch in &mut patches {
+                    fit(mem, patch, STATUS_PX);
+                }
+                for p in &patches {
+                    println!("{},{} {}x{} em={} px={} narrow={} bold={} picture={} {} <- {}", p.x, p.y, p.w, p.h, p.em, p.px, p.narrow, p.bold, p.backdrop.is_some(), p.text, p.source);
+                }
+                draw_patches(mem, &patches);
+                GdiFlush();
+                std::ptr::copy_nonoverlapping(bits as *const u8, bgra.as_mut_ptr(), bgra.len());
+                DeleteDC(mem);
+                DeleteObject(dib);
             }
-            for p in &patches {
-                println!("{},{} {}x{} em={} px={} narrow={} bold={} picture={} {} <- {}", p.x, p.y, p.w, p.h, p.em, p.px, p.narrow, p.bold, p.backdrop.is_some(), p.text, p.source);
-            }
-            draw_patches(mem, &patches);
-            GdiFlush();
-            std::ptr::copy_nonoverlapping(bits as *const u8, bgra.as_mut_ptr(), bgra.len());
+            let rgb: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+            let file = std::io::BufWriter::new(std::fs::File::create(output).unwrap());
+            let mut encoder = png::Encoder::new(file, w as u32, h as u32);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&rgb).unwrap();
         }
-        let rgb: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
-        let file = std::io::BufWriter::new(std::fs::File::create(output).unwrap());
-        let mut encoder = png::Encoder::new(file, w as u32, h as u32);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header().unwrap().write_image_data(&rgb).unwrap();
     }
 }
