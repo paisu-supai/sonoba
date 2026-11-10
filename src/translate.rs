@@ -18,6 +18,7 @@ const CANCELLED: &str = "中止しました";
 const CACHE_MAX: usize = 4096;
 const CHUNK_CHARS: usize = 240; // in one request, one paragraph per line
 const CONTEXT_CHARS: usize = 300;
+const NEAR_LABELS: usize = 6; // chunks on either side of a label alone that come along as its context
 const CHAT_INSTRUCTION: &str = "Keep one line of output for each line of input. Output only the translation.";
 
 const HISTORY_MAX: usize = 300;
@@ -168,7 +169,7 @@ impl Translator {
                         let Some(chunk) = chunks.get(i) else { return };
                         // Neighbours in the same request give each other context; the ones
                         // just above come along as reference, since they run alongside.
-                        let context = if i > 0 { tail(&chunks[i - 1].join(" ")) } else { String::new() };
+                        let context = context_for(&chunks, i);
                         let ask = |text: &str, on_line: &mut dyn FnMut(&str)| this.ask(format, text, &context, keep_going, on_line);
                         if !keep_going() {
                             return;
@@ -280,6 +281,21 @@ fn chunks<'a>(texts: &[&'a str]) -> Vec<Vec<&'a str>> {
         }
     }
     out
+}
+
+/// What the model is told comes with chunk `i`. A label alone is ambiguous, "Exit" a way out
+/// and "Auto" a car, so it gets the labels around it, which say what kind of screen this is;
+/// anything else, or a label with none around it, gets the chunk before it.
+fn context_for(chunks: &[Vec<&str>], i: usize) -> String {
+    let label = |c: &Vec<&str>| c.len() == 1 && is_fragment(c[0]);
+    if label(&chunks[i]) {
+        let near = &chunks[i.saturating_sub(NEAR_LABELS)..(i + NEAR_LABELS + 1).min(chunks.len())];
+        let labels: Vec<&str> = near.iter().filter(|c| label(c)).map(|c| c[0]).collect();
+        if labels.len() > 1 {
+            return tail(&labels.join(" "));
+        }
+    }
+    if i > 0 { tail(&chunks[i - 1].join(" ")) } else { String::new() }
 }
 
 /// A few words, or a short run of Japanese or Chinese, which has no spaces to count.
@@ -597,6 +613,17 @@ mod tests {
         let (a, b, c) = ("The first sentence is here.", "And a second one follows it.", "A third sentence comes after.");
         let texts = [a, b, long.as_str(), c];
         assert_eq!(chunks(&texts), [vec![a, b], vec![long.as_str()], vec![c]]);
+    }
+
+    #[test]
+    fn a_label_alone_hears_the_labels_around_it() {
+        let sentence = "A whole sentence that is no label at all.";
+        let chunks = vec![vec!["Back"], vec!["Save"], vec!["Prefs"], vec![sentence]];
+        assert_eq!(context_for(&chunks, 2), "Back Save Prefs");
+        assert_eq!(context_for(&chunks, 3), "Prefs");
+        assert_eq!(context_for(&chunks[..1], 0), "");
+        let lone = vec![vec![sentence], vec!["Exit"]];
+        assert_eq!(context_for(&lone, 1), sentence);
     }
 
     #[test]
