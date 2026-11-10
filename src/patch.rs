@@ -60,6 +60,7 @@ pub struct Backdrop {
     pub w: i32,
     pub h: i32,
     pub bgra: Vec<u8>,
+    under: Vec<[i32; 3]>, // the picture it was painted from, letters and all
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,7 +383,8 @@ fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (us
         let g = if (p[2], p[1], p[0]) == (255, 0, 255) { 1 } else { p[1] as u8 };
         pixels.extend([p[0] as u8, g, p[2] as u8, 255]);
     }
-    Backdrop { w: w as i32, h: h as i32, bgra: pixels }
+    let under = (y..y + h).flat_map(|row| (x..x + w).map(move |col| (col, row))).map(|(col, row)| pixel(bgra, width, col, row)).collect();
+    Backdrop { w: w as i32, h: h as i32, bgra: pixels, under }
 }
 
 impl Patch {
@@ -456,6 +458,19 @@ impl Patch {
         let area = x1.saturating_sub(x0) * y1.saturating_sub(y0);
         let moved = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| distance(pixel(frame, width, x, y), pixel(other, width, x, y)) > SAME_BG).count();
         moved * 100 <= area
+    }
+
+    /// True when the picture under this patch has moved on from the one its backdrop was painted
+    /// from, a little at a time or all at once.
+    pub fn backdrop_behind(&self, frame: &[u8], width: usize) -> bool {
+        let Some(b) = &self.backdrop else { return false };
+        let height = frame.len() / 4 / width;
+        if self.x < 0 || self.y < 0 || (self.x + b.w) as usize > width || (self.y + b.h) as usize > height {
+            return true;
+        }
+        let (x, y, w) = (self.x as usize, self.y as usize, b.w as usize);
+        let moved = b.under.iter().enumerate().filter(|&(i, &was)| distance(pixel(frame, width, x + i % w, y + i / w), was) > SAME_BG).count();
+        moved * 100 > b.under.len()
     }
 
     /// True once the original text is no longer there.
@@ -767,6 +782,17 @@ mod tests {
         one.lines = 2;
         let p = Patch::new(&img, 300, 40, &one, "訳".into());
         assert_eq!(p.max_w, p.w);
+    }
+
+    #[test]
+    fn a_backdrop_knows_when_the_picture_behind_it_has_moved_on() {
+        let mut first = canvas(100, 40, [90, 60, 120]);
+        paint(&mut first, 100, (20, 15, 60, 25), WHITE, 3);
+        let p = Patch { x: 10, y: 10, w: 60, h: 20, ..Patch::status("", 60) }.keep_picture(&first, 100, 40);
+        assert!(!p.backdrop_behind(&first, 100));
+        let mut later = canvas(100, 40, [120, 70, 150]); // the scene behind the same text, some steps on
+        paint(&mut later, 100, (20, 15, 60, 25), WHITE, 3);
+        assert!(p.backdrop_behind(&later, 100));
     }
 
     #[test]
