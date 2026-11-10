@@ -546,7 +546,9 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32, around_right: i32) -
     // Wrapped lines share an edge or a middle: left, with room for an indent, centred, or right.
     // A menu bar over a game's dialogue overlaps it but lines up with it in none of these.
     let lined_up = (a.x - b.x).abs() <= h * 3 || (a.x * 2 + a.w - b.x * 2 - b.w).abs() <= h * 2 || (a.x + a.w - b.x - b.w).abs() <= h;
-    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !a.same_style(b) {
+    // Over a picture the background differs from line to line; the letters' colour does not.
+    let alike = a.same_style(b) || (a.picture && b.picture && a.same_fg(b));
+    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !alike {
         return false;
     }
     // A hard line break: b's first word would have fitted on a, so nothing forced a wrap.
@@ -912,6 +914,7 @@ mod tests {
         assert_eq!(text_of(&ocr, "ui-14px"), text_of(&Ocr::new(4, &[]).unwrap(), "ui-14px"));
     }
 }
+
 
 
 
