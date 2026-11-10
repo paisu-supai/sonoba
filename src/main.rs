@@ -1912,6 +1912,8 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 }
                 0
             }
+            // The tray menu leaves this hidden window in front, so a later Alt+F4 would quit Sonoba unseen.
+            WM_SYSCOMMAND if w & 0xFFF0 == SC_CLOSE as usize => 0,
             WM_DESTROY => {
                 tray_icon(hwnd, NIM_DELETE);
                 PostQuitMessage(0);
