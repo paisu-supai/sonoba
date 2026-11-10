@@ -120,11 +120,13 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     let mut bg = [(b / n) as i32, (g / n) as i32, (r / n) as i32];
     // A picture has no common colour, so the letters of a thick subtitle can come first. The
     // box reaches past the text, so its two ends are the background then. Bold letters packed
-    // tight can outnumber a flat background too, but then the ends are all that colour.
+    // tight can outnumber a flat background too, but then the box's whole edge, ends, top and
+    // bottom, is that colour; a patch of one colour in a picture rarely runs all round.
     let ends: Vec<usize> = (x0..x1).take(EDGE_COLUMNS).chain((x0..x1).rev().take(EDGE_COLUMNS)).collect();
     let around: Vec<[i32; 3]> = middle.clone().flat_map(|row| ends.iter().map(move |&col| (col, row))).map(|(col, row)| pixel(bgra, width, col, row)).collect();
-    let flat_ends = around.iter().filter(|&&p| distance(p, bg) <= GLYPH_DISTANCE).count() * 10 >= around.len() * 9;
-    let picture = n * 2 < (middle.len() * (x1 - x0)) as u64 && !flat_ends;
+    let edge: Vec<[i32; 3]> = (x0..x1).flat_map(|col| [(col, y0), (col, y1 - 1)]).map(|(col, row)| pixel(bgra, width, col, row)).chain(around.iter().copied()).collect();
+    let flat_edge = edge.iter().filter(|&&p| distance(p, bg) <= SAME_BG).count() * 10 >= edge.len() * 9; // a see-through box over a scene varies more
+    let picture = n * 2 < (middle.len() * (x1 - x0)) as u64 && !flat_edge;
     if picture {
         bg = [0, 1, 2].map(|c| around.iter().map(|p| p[c]).sum::<i32>() / around.len().max(1) as i32);
     }
@@ -160,8 +162,10 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
 
     // An icon before the text: a blob about as wide as the line is tall, then a wide gap, and
     // not the width that the first word read from the box would have. A field's edge can
-    // come before the icon, so look more than once.
+    // come before the icon, so look more than once. A full stop can leave a gap inside a word,
+    // as in "Q.Save", so the blob is held against the word up to it.
     let first = first_word.unwrap_or("");
+    let first = first.split_inclusive('.').next().unwrap_or(first);
     let mut icon = false;
     while first_word.is_some() {
         let inked: Vec<usize> = cols.iter().copied().filter(|&col| (top..bottom).any(|row| is_ink(col, row))).collect();
@@ -170,7 +174,7 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
         // puts spaces between words, so a first word of one syllable is common.
         let letters: usize = first.chars().map(|c| if matches!(c, '\u{AC00}'..='\u{D7A3}') { 2 } else { 1 }).sum();
         let word_w = letters * tall * 9 / 20;
-        let is_word = |w: usize| first.chars().all(char::is_alphanumeric) && w * 2 >= word_w && w * 10 <= word_w * 17;
+        let is_word = |w: usize| first.trim_end_matches('.').chars().all(char::is_alphanumeric) && w * 2 >= word_w && w * 10 <= word_w * 17;
         let gap = inked.windows(2).position(|pair| (pair[1] - pair[0]) * 5 > tall * 3);
         let Some(i) = gap.filter(|&i| (inked[i] - inked[0]) * 2 <= tall * 3 && !is_word(inked[i] - inked[0] + 1)) else { break };
         cols.retain(|&col| col > inked[i]);
@@ -289,12 +293,13 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     Some(Glyphs { x, y, w: right as i32 + 1 - x, h, letters: if glow { letters } else { h }, bg, fg, stem, icon, picture })
 }
 
-/// The detector box cut at blank gaps nearly as wide as the letters are tall and well over the
+/// The detector box cut at blank gaps at least one and a half letters wide and well over the
 /// line's usual space between words: a menu bar or the cells of a table, read as one line, are
-/// each their own label. A monospaced comma and space come close to the first test, so the second
-/// keeps prose whole. Each piece reaches halfway into the gaps on either side. A glow around the
-/// letters counts as blank.
-pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32)) -> Vec<(i32, i32, i32, i32)> {
+/// each their own label. `chars` is how many letters the line was read as, which gives their
+/// width; their height can take in a picture's bright patches. A monospaced comma and space come
+/// close to the first test, so the second keeps prose whole. Each piece reaches halfway into the
+/// gaps on either side. A glow around the letters counts as blank.
+pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32), chars: usize) -> Vec<(i32, i32, i32, i32)> {
     let Some(g) = glyphs(bgra, width, height, rect, None) else { return vec![rect] };
     // Without a glow, a thin stem's few pixels can sit nearer the background than the ink.
     let glow = g.letters < g.h;
@@ -307,11 +312,13 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
     for col in g.x..g.x + g.w {
         if !inked(col) {
             blank_from.get_or_insert(col);
-        } else if let Some(start) = blank_from.take() {
+        } else if let Some(start) = blank_from.take().filter(|&start| start > g.x) {
             gaps.push((start, col - start));
         }
     }
-    let wide = |w: i32| w * 10 >= g.letters * 9;
+    let between_words: i32 = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 >= g.letters).sum();
+    let letter_w = (g.w - between_words) / chars.max(1) as i32;
+    let wide = |w: i32| w * 2 >= letter_w * 3;
     let mut spaces: Vec<i32> = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 >= g.letters && !wide(w)).collect();
     spaces.sort_unstable();
     let usual = spaces.get(spaces.len() / 2).copied().unwrap_or(0);
