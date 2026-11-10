@@ -14,7 +14,8 @@ pub const WOBBLE_PERCENT: usize = 2; // edges that change without the text chang
 const EDGE_COLUMNS: usize = 2;
 const EDGE_PX: usize = 2; // a text edge rises within this many pixels, most of a video's do not
 const LETTER_FRINGE: usize = 2; // antialiasing around the letters goes with them
-const GLOW_PX: usize = 4; // how far a glow or outline reaches from the letters
+const GLOW_PX: usize = 4; // how far a glow or outline reaches from small letters
+const GLOW_PER_HEIGHT: usize = 8; // and from big ones: an eighth of the patch's height
 const SMOOTHING: usize = 4; // passes over a painted-out letter, so that no outline of it shows
 const SAME_BG: i32 = 30;
 const SAME_FG: i32 = 80; // thin text rarely reaches its true colour, so allow for that
@@ -77,11 +78,38 @@ pub struct Patch {
     pub fg: u32,
     pub bold: bool,
     pub backdrop: Option<Arc<Backdrop>>, // shown instead of the flat `bg`
+    pub seen: Arc<Seen>, // the text as it was read, to tell when it has gone
     pub text: String,
     pub source: String, // what OCR read
     pub px: i32,     // font size, set when laid out on the UI thread
     pub narrow: i32, // letter width in percent of the font's own, ditto
     pub text_h: i32, // measured height, ditto
+}
+
+/// The pixels under a patch when its text was read. Compared with the screen before it, a text
+/// that fades out with the screen would never seem to go: each look sees it only a little fainter.
+#[derive(Debug, Default, PartialEq)]
+pub struct Seen {
+    x: usize,
+    y: usize,
+    w: usize,
+    bgra: Vec<u8>,
+}
+
+impl Seen {
+    fn of(bgra: &[u8], width: usize, (x, y, w, h): (i32, i32, i32, i32)) -> Arc<Self> {
+        let height = bgra.len() / 4 / width.max(1);
+        let (x0, y0) = (x.clamp(0, width as i32) as usize, y.clamp(0, height as i32) as usize);
+        let (x1, y1) = ((x + w + EDGE_PX as i32).clamp(0, width as i32) as usize, (y + h).clamp(0, height as i32) as usize);
+        let rows = (y0..y1).flat_map(|row| bgra[(row * width + x0) * 4..(row * width + x1) * 4].iter().copied());
+        Arc::new(Seen { x: x0, y: y0, w: x1 - x0, bgra: rows.collect() })
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<[i32; 3]> {
+        let (col, row) = (x.checked_sub(self.x)?, y.checked_sub(self.y)?);
+        let p = self.bgra.get((row * self.w + col) * 4..)?.get(..3).filter(|_| col < self.w)?;
+        Some([p[0] as i32, p[1] as i32, p[2] as i32])
+    }
 }
 
 fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
@@ -370,31 +398,48 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
 /// a pixel of the letters' colour: a dark sleeve beside a label is the picture.
 fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (usize, usize, usize, usize), fg: [i32; 3]) -> Backdrop {
     let radius = h.max(8);
+    // The middle value of each colour along the row: a big title's tall letters can cross the rows
+    // just outside its box, and an average would carry their colour into the background.
     let smooth_row = |row: usize| -> Vec<[i32; 3]> {
         (x..x + w)
             .map(|col| {
                 let span = col.saturating_sub(radius)..(col + radius + 1).min(width);
-                let n = span.len() as i32;
-                let mut sum = [0; 3];
+                let mut channels: [Vec<i32>; 3] = Default::default();
                 for p in span.map(|c| pixel(bgra, width, c, row)) {
-                    sum = [sum[0] + p[0], sum[1] + p[1], sum[2] + p[2]];
+                    (0..3).for_each(|c| channels[c].push(p[c]));
                 }
-                sum.map(|v| v / n)
+                channels.map(|mut v| {
+                    let middle = v.len() / 2;
+                    *v.select_nth_unstable(middle).1
+                })
             })
             .collect()
     };
     let (above, below) = (smooth_row(y.saturating_sub(1)), smooth_row((y + h).min(height - 1)));
+    // A border line or another panel can run right along the box, as under a settings screen's
+    // title; a row unlike the box around that column gives way to the box's own middle colour
+    // there: of each column's middle colour, the middle one nearby, as letters are thin.
+    let middle_of = |mut v: Vec<i32>| {
+        let middle = v.len() / 2;
+        *v.select_nth_unstable(middle).1
+    };
+    let columns: Vec<[i32; 3]> = (x..x + w).map(|col| [0, 1, 2].map(|c| middle_of((y..y + h).map(|row| pixel(bgra, width, col, row)[c]).collect()))).collect();
+    let typical: Vec<[i32; 3]> = (0..w).map(|col| [0, 1, 2].map(|c| middle_of(columns[col.saturating_sub(radius)..(col + radius + 1).min(w)].iter().map(|p| p[c]).collect()))).collect();
+    let like_the_box = |p: [i32; 3], col: usize| if distance(p, typical[col]) > GLYPH_DISTANCE * 2 { typical[col] } else { p };
     let behind = |col: usize, row: usize| {
-        let (a, b) = (above[col], below[col]);
+        let (a, b) = (like_the_box(above[col], col), like_the_box(below[col], col));
         let (down, up) = (row as i32 + 1, (h - row) as i32);
         [0, 1, 2].map(|c| (a[c] * up + b[c] * down) / (up + down))
     };
 
+    // The colour taken for the letters can be their shadow's, so a thick stroke's far side is as
+    // far from it as the stroke is wide.
+    let reach = (h / GLOW_PER_HEIGHT).max(GLOW_PX);
     let ink: Vec<bool> = (0..w * h).map(|i| distance(pixel(bgra, width, x + i % w, y + i / w), fg) <= SAME_FG).collect();
     let mut letter = vec![false; w * h];
     for row in 0..h {
         for col in 0..w {
-            let near = || (row.saturating_sub(GLOW_PX)..(row + GLOW_PX + 1).min(h)).any(|r| (col.saturating_sub(GLOW_PX)..(col + GLOW_PX + 1).min(w)).any(|c| ink[r * w + c]));
+            let near = || (row.saturating_sub(reach)..(row + reach + 1).min(h)).any(|r| (col.saturating_sub(reach)..(col + reach + 1).min(w)).any(|c| ink[r * w + c]));
             letter[row * w + col] = distance(pixel(bgra, width, x + col, y + row), behind(col, row)) > GLYPH_DISTANCE && near();
         }
     }
@@ -439,7 +484,8 @@ impl Patch {
         let free = ((g.x + g.w) as usize..width).find(|&col| !empty(col)).unwrap_or(width) as i32;
         let max_w = if block.lines == 1 { (free - MARGIN - x).max(w) } else { w };
         let (bg, fg) = (colorref(g.bg), colorref(g.fg));
-        Self { x, y, w, max_w, one_line: block.lines == 1, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
+        let seen = Seen::of(bgra, width, (x, y, w, h));
+        Self { x, y, w, max_w, one_line: block.lines == 1, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, seen, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
     }
 
     /// On a still picture the text goes without the picture going with it. A video would move on
@@ -456,28 +502,42 @@ impl Patch {
     /// How much of the original text has gone, in percent. Only its sharpest edges count: a video
     /// playing behind a subtitle can change every other pixel, even the subtitle's outline.
     pub fn changed_percent(&self, frame: &[u8], basis: &[u8], width: usize) -> usize {
+        self.changed_from(frame, width, |x, y| Some(pixel(basis, width, x, y)))
+    }
+
+    /// How much of the text has gone since it was read.
+    pub fn text_changed(&self, frame: &[u8], width: usize) -> usize {
+        self.changed_from(frame, width, |x, y| self.seen.pixel(x, y))
+    }
+
+    /// True once the text read is no longer there.
+    pub fn is_gone(&self, frame: &[u8], width: usize) -> bool {
+        self.text_changed(frame, width) > GLYPH_STALE_PERCENT
+    }
+
+    fn changed_from(&self, frame: &[u8], width: usize, was: impl Fn(usize, usize) -> Option<[i32; 3]>) -> usize {
         let height = frame.len() / 4 / width;
         let rows = self.y.max(0) as usize..((self.y + self.h).max(0) as usize).min(height);
         let columns = self.x.max(0) as usize..((self.x + self.w).max(0) as usize).min(width.saturating_sub(EDGE_PX));
-        let edge = |image: &[u8], x: usize, y: usize| {
-            let (a, b) = (pixel(image, width, x, y), pixel(image, width, x + EDGE_PX, y));
-            [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-        };
+        let edge = |a: [i32; 3], b: [i32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let now = |x: usize, y: usize| edge(pixel(frame, width, x, y), pixel(frame, width, x + EDGE_PX, y));
+        let then = |x: usize, y: usize| Some(edge(was(x, y)?, was(x + EDGE_PX, y)?));
         let dot = |a: [i32; 3], b: [i32; 3]| (0..3).map(|c| a[c] * b[c]).sum::<i32>();
         let mut sharpest = 0;
         for y in rows.clone() {
             for x in columns.clone() {
-                let was = edge(basis, x, y);
-                sharpest = sharpest.max(dot(was, was));
+                if let Some(was) = then(x, y) {
+                    sharpest = sharpest.max(dot(was, was));
+                }
             }
         }
         let (mut edges, mut gone) = (0, 0);
         for y in rows {
             for x in columns.clone() {
-                let was = edge(basis, x, y);
+                let Some(was) = then(x, y) else { continue };
                 if dot(was, was) * 4 > sharpest {
                     edges += 1;
-                    gone += (dot(edge(frame, x, y), was) * 4 < dot(was, was)) as usize;
+                    gone += (dot(now(x, y), was) * 4 < dot(was, was)) as usize;
                 }
             }
         }
@@ -554,8 +614,15 @@ pub fn scroll(basis: &[u8], frame: &[u8], width: usize, (x0, y0, x1, y1): (usize
 }
 
 impl Patch {
-    pub fn shifted(mut self, dy: i32) -> Self {
+    /// The patch moved with its text, as a chat's lines move for a new one, in `frame`.
+    pub fn shifted(mut self, dy: i32, frame: &[u8], width: usize) -> Self {
         self.y += dy;
+        self.seen_in(frame, width)
+    }
+
+    /// The text taken as read from `frame`.
+    pub fn seen_in(mut self, frame: &[u8], width: usize) -> Self {
+        self.seen = Seen::of(frame, width, (self.x, self.y, self.w, self.h));
         self
     }
 
@@ -573,6 +640,7 @@ impl Patch {
             fg: STATUS_FG,
             bold: false,
             backdrop: None,
+            seen: Arc::default(),
             text: text.to_string(),
             source: String::new(),
             px: 0,
@@ -934,6 +1002,18 @@ mod tests {
         assert!(distance(at(22, 30), pixel(&before, w, 22, 30)) < 30, "{:?}", at(22, 30));
         assert_eq!(at(32, 30), pixel(&before, w, 32, 30), "between the letters nothing changes");
         assert_eq!(at(280, 30), [0; 3], "the sleeve stays");
+    }
+
+    #[test]
+    fn a_border_line_under_a_title_is_not_what_lies_behind_it() {
+        let (w, h) = (200usize, 60usize);
+        let lavender = [200, 140, 180];
+        let mut img = canvas(w, h, lavender);
+        paint(&mut img, w, (20, 20, 120, 40), WHITE, 3);
+        paint(&mut img, w, (0, 44, 200, 46), WHITE, 1); // the panel's border, right under the box
+        let b = paint_out_letters(&img, w, h, (10, 16, 180, 28), [255; 3]);
+        let at = |x: usize, y: usize| pixel(&b.bgra, 180, x - 10, y - 16);
+        assert!(distance(at(23, 36), lavender.map(i32::from)) < 40, "{:?}", at(23, 36));
     }
 
     #[test]
