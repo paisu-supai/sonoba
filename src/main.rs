@@ -341,7 +341,7 @@ fn same_reading(a: &str, b: &str) -> bool {
 /// line goes unread for a frame. Text that stayed keeps its old patch.
 // shortcut: one letter changing in over fifty counts as wobble; a window into the text would tell.
 fn hold_still(patches: &mut Vec<Patch>, (basis, shown): &(Vec<u8>, Vec<Patch>), frame: &Frame) {
-    let unchanged = |old: &Patch| basis.len() == frame.pixels.len() && old.changed_percent(&frame.pixels, basis, frame.w) <= WOBBLE_PERCENT;
+    let unchanged = |old: &Patch| basis.len() == frame.pixels.len() && old.text_changed(&frame.pixels, frame.w) <= WOBBLE_PERCENT;
     // The picture behind kept text can have moved on; the copy painted under it is made again.
     let kept = |old: &Patch| match old.backdrop_behind(&frame.pixels, frame.w) {
         true => old.clone().keep_picture(&frame.pixels, frame.w, frame.h),
@@ -533,7 +533,7 @@ fn drop_stale_patches(frame: &[u8], width: usize, shared: &Shared, post: &impl F
     if basis.len() != frame.len() {
         return;
     }
-    let stale: Vec<bool> = patches.iter().map(|p| p.is_stale(frame, basis, width)).collect();
+    let stale: Vec<bool> = patches.iter().map(|p| p.is_gone(frame, width)).collect();
     // The picture behind text that stays can move on, as when a scene changes behind a game's
     // dialogue; the copy painted under the translation would then stand still in it.
     let behind: Vec<bool> = patches.iter().zip(&stale).map(|(p, &stale)| !stale && p.backdrop_behind(frame, width)).collect();
@@ -557,7 +557,7 @@ fn drop_stale_patches(frame: &[u8], width: usize, shared: &Shared, post: &impl F
             }
             let dy = scrolled(&moves, &p, frame, basis, width)?;
             followed = true;
-            Some(p.shifted(dy))
+            Some(p.shifted(dy, frame, width))
         })
         .collect();
     *patches = kept;
@@ -619,7 +619,7 @@ fn catch_up(pixels: &[u8], patches: &mut Vec<Patch>, width: usize, shared: &Shar
             if p.source.is_empty() || !p.is_stale(&latest, pixels, width) {
                 return Some(p);
             }
-            scrolled(&moves, &p, &latest, pixels, width).map(|dy| p.shifted(dy))
+            scrolled(&moves, &p, &latest, pixels, width).map(|dy| p.shifted(dy, &latest, width))
         })
         .collect();
     Some(latest)
@@ -1759,8 +1759,13 @@ unsafe fn draw_patches(hdc: HDC, patches: &[Patch]) {
                 None => fill(hdc, &RECT { left: p.x, top: p.y, right: p.x + p.w, bottom: p.y + p.h }, p.bg),
             }
         }
-        // A second pass, so no patch can paint over the text of the one before it.
+        // A second pass, so no patch can paint over the text of the one before it. Text stays on
+        // what its patch painted: the outline off its left edge would blend into the overlay's
+        // see-through colour and show as pink.
         for p in patches {
+            let (w, h) = p.backdrop.as_ref().map_or((p.w, p.h), |b| (b.w, b.h));
+            let saved = SaveDC(hdc);
+            IntersectClipRect(hdc, p.x, p.y, p.x + w, p.y + h);
             let font = text_font(p.px, p.bold, p.narrow);
             let old_font = SelectObject(hdc, font);
             let top = p.y + (p.h - p.text_h) / 2;
@@ -1782,6 +1787,7 @@ unsafe fn draw_patches(hdc: HDC, patches: &[Patch]) {
             write(0, 0, p.fg);
             SelectObject(hdc, old_font);
             DeleteObject(font);
+            RestoreDC(hdc, saved);
         }
     }
 }
@@ -2428,7 +2434,7 @@ mod tests {
     #[test]
     fn a_letter_read_differently_keeps_the_translation_until_the_pixels_change() {
         let columns: Vec<usize> = (10..90).step_by(6).collect();
-        let shown = (page(&columns), vec![shown_patch("guardian", "守護者")]);
+        let shown = (page(&columns), vec![shown_patch("guardian", "守護者").seen_in(&page(&columns), 100)]);
         let still = Frame { pixels: shown.0.clone(), w: 100, h: 20 };
         let mut patches = vec![shown_patch("quardian", "クァルディアン")];
         hold_still(&mut patches, &shown, &still);
@@ -2443,11 +2449,22 @@ mod tests {
     #[test]
     fn a_line_unread_for_a_frame_stays_until_its_pixels_go() {
         let columns: Vec<usize> = (10..90).step_by(6).collect();
-        let shown = (page(&columns), vec![shown_patch("guardian", "守護者")]);
+        let shown = (page(&columns), vec![shown_patch("guardian", "守護者").seen_in(&page(&columns), 100)]);
         let mut patches = Vec::new();
         hold_still(&mut patches, &shown, &Frame { pixels: shown.0.clone(), w: 100, h: 20 });
         assert_eq!(patches.len(), 1);
 
+        let mut patches = Vec::new();
+        hold_still(&mut patches, &shown, &Frame { pixels: page(&[]), w: 100, h: 20 });
+        assert!(patches.is_empty());
+    }
+
+    /// A game's menu fades out as a settings screen fades in. Each look saw the label only a
+    /// little fainter than the look before, so the last picture shown is the new screen already.
+    #[test]
+    fn a_label_that_faded_out_with_its_screen_goes() {
+        let columns: Vec<usize> = (10..90).step_by(6).collect();
+        let shown = (page(&[]), vec![shown_patch("Q.Load", "Q.ロード").seen_in(&page(&columns), 100)]);
         let mut patches = Vec::new();
         hold_still(&mut patches, &shown, &Frame { pixels: page(&[]), w: 100, h: 20 });
         assert!(patches.is_empty());
@@ -2484,6 +2501,37 @@ mod tests {
         }
         assert!(many.narrow == 100 && many.text_h > one.text_h, "the test needs a label that wraps: {many:?}");
         assert!(one.narrow < 100 && one.px == 15, "{one:?}");
+    }
+
+    /// The overlay is its see-through colour wherever no patch is; text drawn there would show.
+    #[test]
+    fn text_stays_on_its_patch() {
+        let (w, h) = (120usize, 50usize);
+        let picture = vec![90u8; w * h * 4];
+        let mut patch = Patch { x: 10, y: 10, w: 60, h: 24, em: 20, fg: 0x00FFFFFF, text: "戻る".into(), ..Patch::status("", 60) }.keep_picture(&picture, w, h);
+        let drawn = unsafe {
+            let mem = CreateCompatibleDC(null_mut());
+            let mut info: BITMAPINFO = std::mem::zeroed();
+            info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            (info.bmiHeader.biWidth, info.bmiHeader.biHeight) = (w as i32, -(h as i32));
+            (info.bmiHeader.biPlanes, info.bmiHeader.biBitCount) = (1, 32);
+            let mut bits = null_mut();
+            let dib = CreateDIBSection(mem, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            SelectObject(mem, dib);
+            fill(mem, &RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 }, KEY_COLOR);
+            fit(mem, &mut patch, STATUS_PX);
+            draw_patches(mem, &[patch.clone()]);
+            GdiFlush();
+            let drawn = std::slice::from_raw_parts(bits as *const u32, w * h).to_vec();
+            DeleteDC(mem);
+            DeleteObject(dib);
+            drawn
+        };
+        let b = patch.backdrop.as_ref().unwrap();
+        let inside = |x: i32, y: i32| (patch.x..patch.x + b.w).contains(&x) && (patch.y..patch.y + b.h).contains(&y);
+        let outside: Vec<(i32, i32)> = (0..h as i32).flat_map(|y| (0..w as i32).map(move |x| (x, y))).filter(|&(x, y)| !inside(x, y) && drawn[y as usize * w + x as usize] & 0xFFFFFF != 0xFF00FF).collect();
+        assert!(outside.is_empty(), "drawn outside the patch: {:?}", &outside[..outside.len().min(5)]);
+        assert!((0..w * h).any(|i| drawn[i] & 0xFFFFFF == 0xFFFFFF), "the text was drawn");
     }
 
     /// Draws the overlay onto a picture, to judge a layout without touching the real screen:

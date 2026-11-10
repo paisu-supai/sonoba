@@ -185,12 +185,13 @@ impl Ocr {
         let img = Rgbf::from_bgra_padded(bgra, w, h, PAD);
         let (pad, boxes) = (PAD as i32, self.detect(&img)?);
         // A line with wide gaps in it, such as a menu bar, is read again piece by piece: the
-        // letters it was read as tell how wide a gap must be to part two labels.
+        // letters it was read as tell how wide a gap must be to part two labels. The recogniser
+        // can leave the space out of a wide gap too, as in "BackSave".
         let read_box = |rect: (usize, usize, usize, usize)| -> Result<Vec<Line>, String> {
             let Some(line) = self.read_line(bgra, &img, (w, h), rect)? else { return Ok(Vec::new()) };
             let chars = line.text.chars().filter(|c| !c.is_whitespace()).count();
             let (x, y, bw, bh) = rect;
-            let pieces = if line.text.contains(' ') { patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32), chars) } else { Vec::new() };
+            let pieces = if chars > 1 { patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32), chars) } else { Vec::new() };
             if pieces.len() < 2 {
                 return Ok(vec![line]);
             }
