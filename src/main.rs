@@ -55,6 +55,7 @@ const READING_SLIP: usize = 2; // letters OCR may read differently from one fram
 const SAME_PLACE_PX: i32 = 3; // a patch this close to the last one with the same text is the same patch
 const MIN_SELECTION: i32 = 8;
 const MIN_TEXT_PX: i32 = 9; // below this Japanese stops being legible; the patch grows instead
+const NARROWS: [i32; 3] = [100, 88, 76]; // letter widths to try at a size before going smaller; narrower reads poorly
 const STATUS_PX: i32 = 16;
 const DEFAULT_FONT: &str = "Yu Gothic UI";
 
@@ -1370,13 +1371,31 @@ unsafe extern "system" fn select_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
 
 // --- Overlay: everything is the see-through key colour except the patches
 
-unsafe fn text_font(px: i32, bold: bool) -> HFONT {
+/// `narrow` is the letters' width in percent of the font's own.
+unsafe fn text_font(px: i32, bold: bool, narrow: i32) -> HFONT {
+    let font = unsafe { font_of(px, 0, bold) };
+    if narrow >= 100 {
+        return font;
+    }
+    unsafe {
+        let dc = GetDC(null_mut());
+        let old = SelectObject(dc, font);
+        let mut metrics: TEXTMETRICW = std::mem::zeroed();
+        GetTextMetricsW(dc, &mut metrics);
+        SelectObject(dc, old);
+        ReleaseDC(null_mut(), dc);
+        DeleteObject(font);
+        font_of(px, (metrics.tmAveCharWidth * narrow / 100).max(1), bold)
+    }
+}
+
+unsafe fn font_of(px: i32, width: i32, bold: bool) -> HFONT {
     let config = config::get();
     let face = wide_z(if config.font.is_empty() { DEFAULT_FONT } else { &config.font });
     unsafe {
         CreateFontW(
             -px,
-            0,
+            width,
             0,
             0,
             if bold || config.bold_text { FW_BOLD } else { FW_NORMAL } as i32,
@@ -1396,12 +1415,13 @@ unsafe fn text_font(px: i32, bold: bool) -> HFONT {
 const TEXT_FLAGS: DRAW_TEXT_FORMAT = DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL;
 
 /// Keeps the original font size if the text fits, spreading one line over empty background
-/// first and shrinking only after that. Overhanging leading is empty, so it does not count,
-/// and the patch grows only when even MIN_TEXT_PX does not fit.
+/// first, then narrowing the letters, and shrinking only after that: a translation as tall as
+/// the labels around it reads better than a small one. Overhanging leading is empty, so it does
+/// not count, and the patch grows only when even MIN_TEXT_PX does not fit.
 unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
     let text = wide(&patch.text);
-    let measure = |px: i32, width: i32| unsafe {
-        let font = text_font(px, patch.bold);
+    let measure = |px: i32, narrow: i32, width: i32| unsafe {
+        let font = text_font(px, patch.bold, narrow);
         let old = SelectObject(hdc, font);
         let mut rect = RECT { left: 0, top: 0, right: width, bottom: 0 };
         DrawTextW(hdc, text.as_ptr(), text.len() as i32, &mut rect, TEXT_FLAGS | DT_CALCRECT);
@@ -1412,23 +1432,27 @@ unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
     let status = patch.h == 0;
     let mut px = if status { status_px } else { patch.em.max(1) };
     let smallest = MIN_TEXT_PX.min(px);
-    let (size, width) = loop {
+    let narrows: &[i32] = if status { &[100] } else { &NARROWS };
+    let (size, width, narrow) = 'fit: loop {
         let room = patch.h + px / 2;
-        let normal = measure(px, patch.w);
-        if normal.bottom <= room {
-            break (normal, patch.w);
-        }
-        let spread = measure(px, patch.max_w);
-        if spread.bottom <= room {
-            break (spread, patch.w.max(spread.right + 1));
+        for &narrow in narrows {
+            let normal = measure(px, narrow, patch.w);
+            if normal.bottom <= room {
+                break 'fit (normal, patch.w, narrow);
+            }
+            let spread = measure(px, narrow, patch.max_w);
+            if spread.bottom <= room {
+                break 'fit (spread, patch.w.max(spread.right + 1), narrow);
+            }
         }
         if status || px <= smallest {
+            let normal = measure(px, 100, patch.w);
             patch.h = normal.bottom;
-            break (normal, patch.w);
+            break (normal, patch.w, 100);
         }
         px -= 1;
     };
-    (patch.px, patch.text_h) = (px, size.bottom);
+    (patch.px, patch.narrow, patch.text_h) = (px, narrow, size.bottom);
     patch.w = if status { size.right } else { width };
 }
 
@@ -1640,7 +1664,7 @@ unsafe fn draw_patches(hdc: HDC, patches: &[Patch]) {
         }
         // A second pass, so no patch can paint over the text of the one before it.
         for p in patches {
-            let font = text_font(p.px, p.bold);
+            let font = text_font(p.px, p.bold, p.narrow);
             let old_font = SelectObject(hdc, font);
             let top = p.y + (p.h - p.text_h) / 2;
             // DT_EDITCONTROL drops a last line that overhangs, so the box must hold all of it.
@@ -2204,7 +2228,7 @@ mod tests {
         let reads = Cell::new(0);
         let read = |_: &[u8], _: usize, _: usize| {
             reads.set(reads.get() + 1);
-            let glyphs = patch::Glyphs { x: 0, y: 0, w: 1, h: 1, bg: [0; 3], fg: [0; 3], stem: 1, icon: false, picture: false };
+            let glyphs = patch::Glyphs { x: 0, y: 0, w: 1, h: 1, letters: 1, bg: [0; 3], fg: [0; 3], stem: 1, icon: false, picture: false };
             Ok(vec![ocr::Line { glyphs, text: String::new() }])
         };
         let mut frame = vec![0u8; 4 * 4];
@@ -2377,7 +2401,7 @@ mod tests {
                 fit(mem, patch, STATUS_PX);
             }
             for p in &patches {
-                println!("{},{} {}x{} em={} px={} bold={} {} <- {}", p.x, p.y, p.w, p.h, p.em, p.px, p.bold, p.text, p.source);
+                println!("{},{} {}x{} em={} px={} narrow={} bold={} picture={} {} <- {}", p.x, p.y, p.w, p.h, p.em, p.px, p.narrow, p.bold, p.backdrop.is_some(), p.text, p.source);
             }
             draw_patches(mem, &patches);
             GdiFlush();
