@@ -183,13 +183,23 @@ impl Ocr {
     pub fn read(&self, bgra: &[u8], w: usize, h: usize) -> Result<Vec<Line>, String> {
         let img = Rgbf::from_bgra_padded(bgra, w, h, PAD);
         let (pad, boxes) = (PAD as i32, self.detect(&img)?);
-        let boxes: Vec<_> = boxes
-            .iter()
-            .flat_map(|&(x, y, bw, bh)| patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32)))
-            .map(|(x, y, bw, bh)| ((x + pad) as usize, (y + pad) as usize, bw as usize, bh as usize))
-            .collect();
-        let lines: Vec<Option<Line>> =
-            self.pool.run(|| boxes.par_iter().map(|&rect| self.read_line(bgra, &img, (w, h), rect)).collect::<Result<_, _>>())?;
+        // A line with wide gaps in it, such as a menu bar, is read again piece by piece: the
+        // letters it was read as tell how wide a gap must be to part two labels.
+        let read_box = |rect: (usize, usize, usize, usize)| -> Result<Vec<Line>, String> {
+            let Some(line) = self.read_line(bgra, &img, (w, h), rect)? else { return Ok(Vec::new()) };
+            let chars = line.text.chars().filter(|c| !c.is_whitespace()).count();
+            let (x, y, bw, bh) = rect;
+            let pieces = if line.text.contains(' ') { patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32), chars) } else { Vec::new() };
+            if pieces.len() < 2 {
+                return Ok(vec![line]);
+            }
+            let mut out = Vec::new();
+            for (px, py, pw, ph) in pieces {
+                out.extend(self.read_line(bgra, &img, (w, h), ((px + pad) as usize, (py + pad) as usize, pw as usize, ph as usize))?);
+            }
+            Ok(out)
+        };
+        let lines: Vec<Vec<Line>> = self.pool.run(|| boxes.par_iter().map(|&rect| read_box(rect)).collect::<Result<_, _>>())?;
         let mut lines: Vec<Line> = lines.into_iter().flatten().collect();
         reading_order(&mut lines);
         Ok(lines)
@@ -527,7 +537,10 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32, around_right: i32) -
     let gap = b.y - (a.y + a.h);
     let similar_height = (a.h - b.h).abs() * 3 <= h;
     let same_column = (a.x + a.w).min(b.x + b.w) > a.x.max(b.x);
-    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !a.same_style(b) {
+    // Wrapped lines share an edge or a middle: left, with room for an indent, centred, or right.
+    // A menu bar over a game's dialogue overlaps it but lines up with it in none of these.
+    let lined_up = (a.x - b.x).abs() <= h * 3 || (a.x * 2 + a.w - b.x * 2 - b.w).abs() <= h * 2 || (a.x + a.w - b.x - b.w).abs() <= h;
+    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !a.same_style(b) {
         return false;
     }
     // A hard line break: b's first word would have fitted on a, so nothing forced a wrap.
@@ -574,6 +587,14 @@ mod tests {
 
     fn l(x: i32, y: i32, w: i32, text: &str) -> Line {
         at(x, y, w, 18, text)
+    }
+
+    /// A game's menu bar sits just above its dialogue and overlaps it, but lines up with it at
+    /// neither edge nor middle.
+    #[test]
+    fn a_menu_bar_does_not_run_into_the_dialogue_below() {
+        let lines = [l(530, 0, 240, "Save Q.Save Q.Load Skip"), l(0, 24, 700, "Then, why didn't you use your hiding skills to hide from the guards?")];
+        assert_eq!(paragraphs(&lines).len(), 2);
     }
 
     /// Reading order takes the two columns' lines in turn, row by row.
@@ -885,4 +906,5 @@ mod tests {
         assert_eq!(text_of(&ocr, "ui-14px"), text_of(&Ocr::new(4, &[]).unwrap(), "ui-14px"));
     }
 }
+
 
