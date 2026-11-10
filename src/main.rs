@@ -342,6 +342,11 @@ fn same_reading(a: &str, b: &str) -> bool {
 // shortcut: one letter changing in over fifty counts as wobble; a window into the text would tell.
 fn hold_still(patches: &mut Vec<Patch>, (basis, shown): &(Vec<u8>, Vec<Patch>), frame: &Frame) {
     let unchanged = |old: &Patch| basis.len() == frame.pixels.len() && old.changed_percent(&frame.pixels, basis, frame.w) <= WOBBLE_PERCENT;
+    // The picture behind kept text can have moved on; the copy painted under it is made again.
+    let kept = |old: &Patch| match old.backdrop_behind(&frame.pixels, frame.w) {
+        true => old.clone().keep_picture(&frame.pixels, frame.w, frame.h),
+        false => old.clone(),
+    };
     for patch in patches.iter_mut() {
         let near = |a: i32, b: i32| (a - b).abs() <= SAME_PLACE_PX;
         let same = shown.iter().find(|old| {
@@ -349,11 +354,11 @@ fn hold_still(patches: &mut Vec<Patch>, (basis, shown): &(Vec<u8>, Vec<Patch>), 
             (old.text == patch.text && place) || (old.overlaps(patch) && same_reading(&old.source, &patch.source) && unchanged(old))
         });
         if let Some(old) = same {
-            *patch = old.clone();
+            *patch = kept(old);
         }
     }
     let unread = shown.iter().filter(|old| !old.source.is_empty() && unchanged(old) && !patches.iter().any(|p| p.overlaps(old)));
-    let unread: Vec<Patch> = unread.cloned().collect();
+    let unread: Vec<Patch> = unread.map(kept).collect();
     patches.extend(unread);
     patches.sort_by_key(|p| (p.y, p.x)); // what comes and goes must not look like a change
 }
@@ -536,16 +541,24 @@ fn drop_stale_patches(frame: &[u8], width: usize, shared: &Shared, post: &impl F
         return;
     }
     let stale: Vec<bool> = patches.iter().map(|p| p.is_stale(frame, basis, width)).collect();
-    if !stale.contains(&true) {
+    // The picture behind text that stays can move on, as when a scene changes behind a game's
+    // dialogue; the copy painted under the translation would then stand still in it.
+    let behind: Vec<bool> = patches.iter().zip(&stale).map(|(p, &stale)| !stale && p.backdrop_behind(frame, width)).collect();
+    if !stale.contains(&true) && !behind.contains(&true) {
         return;
     }
     // Text that has only moved, as a chat's lines do for a new one, takes its translation along.
-    let moves = scrolls(basis, frame, width);
-    let mut followed = false;
+    let moves = if stale.contains(&true) { scrolls(basis, frame, width) } else { Vec::new() };
+    let height = frame.len() / 4 / width;
+    let (mut followed, mut repainted) = (false, false);
     let kept: Vec<Patch> = patches
         .drain(..)
-        .zip(stale)
-        .filter_map(|(p, stale)| {
+        .zip(stale.into_iter().zip(behind))
+        .filter_map(|(p, (stale, behind))| {
+            if behind {
+                repainted = true;
+                return Some(p.keep_picture(frame, width, height));
+            }
             if !stale {
                 return Some(p);
             }
@@ -555,8 +568,8 @@ fn drop_stale_patches(frame: &[u8], width: usize, shared: &Shared, post: &impl F
         })
         .collect();
     *patches = kept;
-    if followed {
-        *basis = frame.to_vec(); // the text is where it now is
+    if followed || repainted {
+        *basis = frame.to_vec(); // the text is where it now is, on what is now behind it
     }
     post(patches.clone());
 }
