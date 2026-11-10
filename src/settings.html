@@ -642,20 +642,32 @@ function renderTerms(s) {
     box.append(row);
   });
 }
+const found = ([a, b]) => (a + b).toLowerCase().includes($('history_find').value.toLowerCase());
+function pastRow([source, translation]) {
+  const e = document.createElement('div');
+  e.className = 'past';
+  const small = document.createElement('small');
+  small.textContent = source;
+  e.append(translation, small);
+  e.onclick = () => { send('copy', translation); e.firstChild.textContent = T('copied'); setTimeout(renderHistory, 700); };
+  return e;
+}
 function renderHistory() {
-  const box = $('history_list'), find = $('history_find').value.toLowerCase();
-  const shown = past.filter(([a, b]) => (a + b).toLowerCase().includes(find));
+  const box = $('history_list'), shown = past.filter(found);
   box.textContent = '';
   if (!shown.length) { const e = document.createElement('div'); e.className = 'past'; e.textContent = T('history_empty'); box.append(e); }
-  for (const [source, translation] of shown) {
-    const e = document.createElement('div');
-    e.className = 'past';
-    const small = document.createElement('small');
-    small.textContent = source;
-    e.append(translation, small);
-    e.onclick = () => { send('copy', translation); e.firstChild.textContent = T('copied'); setTimeout(renderHistory, 700); };
-    box.append(e);
-  }
+  for (const entry of shown) box.append(pastRow(entry));
+}
+// New translations go on top while the page is open; someone reading further down stays where they are.
+function addHistory(entries) {
+  const had = past.some(found);
+  past = entries.concat(past).slice(0, 300); // as many as the app keeps
+  if (page !== 'history') return;
+  if (!had) return renderHistory();
+  const box = $('history_list'), main = document.querySelector('main'), height = main.scrollHeight;
+  for (const entry of entries.filter(found).reverse()) box.prepend(pastRow(entry));
+  while (box.children.length > 300) box.lastChild.remove();
+  if (main.scrollTop > 0) main.scrollTop += main.scrollHeight - height;
 }
 function renderIntro(s, m, downloading) {
   if (!introOpen) return;
@@ -762,7 +774,9 @@ $('intro_download').onclick = () => {
 };
 $('intro_done').onclick = () => { introOpen = false; $('intro').classList.remove('on'); send('intro_done'); };
 chrome.webview.addEventListener('message', e => {
-  if (e.data.history) { past = e.data.history; renderHistory(); } else render(e.data);
+  if (e.data.go) { show(e.data.go); if (page === 'history') send('history'); }
+  else if (e.data.history_new) addHistory(e.data.history_new);
+  else if (e.data.history) { past = e.data.history; renderHistory(); } else render(e.data);
 });
 show(page);
 post({ cmd: 'ready' });

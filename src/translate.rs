@@ -24,6 +24,8 @@ const HISTORY_MAX: usize = 300;
 
 /// The latest translations, newest first. In memory only: it is what was on someone's screen.
 pub static HISTORY: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+/// Entries ever put into HISTORY, so an open history page can be sent just the new ones.
+pub static HISTORY_ADDED: AtomicUsize = AtomicUsize::new(0);
 
 /// How the translation should read.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -382,6 +384,7 @@ fn remember(source: &str, translation: &str) {
     }
     history.push_front((source.to_string(), translation.to_string()));
     history.truncate(HISTORY_MAX);
+    HISTORY_ADDED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Hy-MT2's own wording from its model card, all in the user turn: it has no system prompt, and

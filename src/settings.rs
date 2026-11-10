@@ -6,7 +6,7 @@ use crate::engine::{self, Device};
 use crate::i18n::t;
 use crate::{models, request_load, request_unload, try_hotkeys};
 use serde_json::{Value, json};
-use crate::translate::HISTORY;
+use crate::translate::{HISTORY, HISTORY_ADDED};
 use std::cell::{Cell, RefCell, OnceCell};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
@@ -47,6 +47,8 @@ thread_local! {
     static MESSAGE: RefCell<String> = const { RefCell::new(String::new()) };
     static FONTS: OnceCell<Vec<String>> = const { OnceCell::new() };
     static CHOOSING_KEY: Cell<bool> = const { Cell::new(false) };
+    static HISTORY_SENT: Cell<usize> = const { Cell::new(0) }; // HISTORY_ADDED as the page last heard it
+    static GO_HISTORY: Cell<bool> = const { Cell::new(false) }; // show the history once the page is up
 }
 
 pub fn window() -> HWND {
@@ -194,16 +196,28 @@ fn state() -> Value {
     })
 }
 
-/// Sends the state if it changed since the last time.
+fn post(text: &str) {
+    WEBVIEW.with_borrow(|webview| {
+        if let Some(webview) = webview {
+            let _ = unsafe { webview.PostWebMessageAsJson(&HSTRING::from(text)) };
+        }
+    });
+}
+
+/// Sends the state if it changed since the last time, and the translations added since.
 fn refresh() {
     let text = state().to_string();
     if SENT.with_borrow(|sent| *sent != text) {
-        WEBVIEW.with_borrow(|webview| {
-            if let Some(webview) = webview {
-                let _ = unsafe { webview.PostWebMessageAsJson(&HSTRING::from(&text)) };
-            }
-        });
+        post(&text);
         SENT.set(text);
+    }
+    let new: Vec<(String, String)> = {
+        let history = HISTORY.lock().unwrap();
+        let added = HISTORY_ADDED.load(Ordering::Relaxed);
+        history.iter().take(added - HISTORY_SENT.replace(added)).cloned().collect()
+    };
+    if !new.is_empty() {
+        post(&json!({ "history_new": new }).to_string());
     }
 }
 
@@ -270,7 +284,12 @@ fn on_message(text: &str) {
     let text_value = value.as_str().unwrap_or("").to_string();
     MESSAGE.set(String::new());
     match message["cmd"].as_str().unwrap_or("") {
-        "ready" => SENT.set(String::new()),
+        "ready" => {
+            SENT.set(String::new());
+            if GO_HISTORY.replace(false) {
+                post(r#"{"go":"history"}"#);
+            }
+        }
         "model" => choice_changed(|c| c.model = text_value),
         "device" => choice_changed(|c| {
             c.device = match text_value.as_str() {
@@ -326,12 +345,12 @@ fn on_message(text: &str) {
             crate::copy_to_clipboard(&text_value);
         }
         "history" => {
-            let history: Vec<(String, String)> = HISTORY.lock().unwrap().iter().cloned().collect();
-            WEBVIEW.with_borrow(|webview| {
-                if let Some(webview) = webview {
-                    let _ = unsafe { webview.PostWebMessageAsJson(&HSTRING::from(json!({ "history": history }).to_string())) };
-                }
-            });
+            let history: Vec<(String, String)> = {
+                let history = HISTORY.lock().unwrap();
+                HISTORY_SENT.set(HISTORY_ADDED.load(Ordering::Relaxed));
+                history.iter().cloned().collect()
+            };
+            post(&json!({ "history": history }).to_string());
         }
         "intro_done" => config::update(|c| c.intro_done = true),
         "license_accept" => config::update(|c| c.license_accepted = true),
@@ -482,6 +501,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                     let _ = controller.Close();
                 }
                 SENT.set(String::new());
+                GO_HISTORY.set(false);
                 WINDOW.set(null_mut());
                 if CHOOSING_KEY.replace(false) {
                     crate::resume_hotkeys();
@@ -531,6 +551,7 @@ pub fn open() {
             null(),
         );
         WINDOW.set(hwnd);
+        HISTORY_SENT.set(HISTORY_ADDED.load(Ordering::Relaxed));
         let dark = (!light_theme()) as i32;
         DwmSetWindowAttribute(hwnd, USE_DARK_TITLE_BAR, &dark as *const _ as *const _, 4);
         let dpi = GetDpiForWindow(hwnd) as i32;
@@ -542,6 +563,17 @@ pub fn open() {
             DestroyWindow(hwnd);
             MessageBoxW(null_mut(), wide(&t("設定画面を開けません。WebView2 ランタイムが必要です。")).as_ptr(), w!("Sonoba"), MB_OK | MB_ICONWARNING);
         }
+    }
+}
+
+/// The settings, opened on the history page.
+pub fn open_history() {
+    let up = WEBVIEW.with_borrow(Option::is_some);
+    open();
+    if up {
+        post(r#"{"go":"history"}"#);
+    } else {
+        GO_HISTORY.set(true);
     }
 }
 
