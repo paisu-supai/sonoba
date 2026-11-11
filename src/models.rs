@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -87,7 +87,7 @@ pub fn list() -> Vec<Entry> {
         .iter()
         .map(|k| Entry { file: k.file.to_string(), family: Some(k.family), size: k.size, tier: k.tier, gb: Some(k.gb), memory_gb: k.memory_gb })
         .collect();
-    if let Ok(folder) = std::fs::read_dir(dir()) {
+    if let Ok(folder) = std::fs::read_dir(folder()) {
         for file in folder.flatten().filter_map(|f| f.file_name().into_string().ok()) {
             if file.ends_with(".gguf") && !entries.iter().any(|e| e.file == file) {
                 entries.push(Entry { file, family: None, size: "", tier: "", gb: None, memory_gb: None });
@@ -97,12 +97,24 @@ pub fn list() -> Vec<Entry> {
     entries
 }
 
+/// The app's own folder for models. The OCR models are always here.
 pub fn dir() -> PathBuf {
     crate::config::portable_dir().cloned().unwrap_or_else(|| crate::config::profile_dir("LOCALAPPDATA")).join("models")
 }
 
+/// Where the translation models are kept: the folder chosen in the settings, or the app's own.
+pub fn folder() -> PathBuf {
+    let chosen = crate::config::get().model_folder;
+    if chosen.is_empty() { dir() } else { PathBuf::from(chosen) }
+}
+
+/// Only the translation models follow the chosen folder: the zip brings an OCR model in the app's own.
+fn path_in(chosen: &str, file: &str) -> PathBuf {
+    if chosen.is_empty() || !file.ends_with(".gguf") { dir().join(file) } else { Path::new(chosen).join(file) }
+}
+
 pub fn path(file: &str) -> PathBuf {
-    dir().join(file)
+    path_in(&crate::config::get().model_folder, file)
 }
 
 pub fn is_present(file: &str) -> bool {
@@ -110,7 +122,9 @@ pub fn is_present(file: &str) -> bool {
 }
 
 fn part(file: &str) -> PathBuf {
-    path(&format!("{file}.part"))
+    let mut part = path(file).into_os_string();
+    part.push(".part");
+    part.into()
 }
 
 /// A download that stopped half way, which the next one picks up.
@@ -166,8 +180,8 @@ fn download(file: &str) -> Result<(), String> {
         }
     };
     let (total, hash) = expected(&repo, remote)?;
-    std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-    let part = part(file); // kept when cancelled, and picked up again by -C -
+    let (target, part) = (path(file), part(file)); // the part is kept when cancelled, and picked up again by -C -
+    std::fs::create_dir_all(target.parent().unwrap_or(Path::new(""))).map_err(|e| e.to_string())?;
     let url = format!("{SOURCE}/{repo}/resolve/main/{remote}");
     if std::fs::metadata(&part).map_or(0, |m| m.len()) < total {
         let mut curl = tool("curl").args(["-sSfL", "-C", "-", "-o"]).arg(&part).arg(&url).stdout(Stdio::null()).spawn().map_err(|e| e.to_string())?;
@@ -194,7 +208,7 @@ fn download(file: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(&part);
         return Err("ダウンロードしたファイルが壊れています".to_string());
     }
-    std::fs::rename(&part, path(file)).map_err(|e| e.to_string())
+    std::fs::rename(&part, target).map_err(|e| e.to_string())
 }
 
 pub fn start_download(file: String) {
@@ -217,6 +231,13 @@ mod tests {
         assert_eq!(format_of("plamo-3-translate-8b-Q3_K_M.gguf"), Format::Plamo);
         assert_eq!(format_of("Hy-MT2-1.8B-Q4_K_M.gguf"), Format::HyMt);
         assert_eq!(format_of("gemma-4-q4.gguf"), Format::Chat);
+    }
+
+    #[test]
+    fn translation_models_follow_the_chosen_folder_and_ocr_models_stay() {
+        assert_eq!(path_in("D:/shared", DEFAULT), Path::new("D:/shared").join(DEFAULT));
+        assert_eq!(path_in("", DEFAULT), dir().join(DEFAULT));
+        assert_eq!(path_in("D:/shared", "korean_PP-OCRv5_mobile_rec.onnx"), dir().join("korean_PP-OCRv5_mobile_rec.onnx"));
     }
 
     #[test]
