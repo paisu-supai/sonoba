@@ -25,6 +25,9 @@ const STATUS_BG: u32 = 0x00201C1C;
 const STATUS_FG: u32 = 0x00F5F5F5;
 const MOVED_TENTHS: usize = 9; // of a patch's rows found again where it moved to
 const MIN_SCROLL_ROWS: usize = 8;
+const MONOSPACED_RUNS: usize = 7; // stretches of ink it takes to tell a grid of cells from chance
+const MONOSPACED_SLACK: f32 = 0.15; // of a cell: how far off the grid a letter's middle may sit
+const MONOSPACED_STRAYS: usize = 16; // one stretch in so many may sit off the grid, as a quote mark's halves do
 
 /// The ink of one text line.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -359,12 +362,15 @@ fn is_letter(p: [i32; 3], fg: [i32; 3], bg: [i32; 3], picture: bool) -> bool {
 
 /// The detector box cut at blank gaps at least one and a half letters wide and well over the
 /// line's usual space between words: a menu bar or the cells of a table, read as one line, are
-/// each their own label. `chars` is how many letters the line was read as, which gives their
-/// width; their height can take in a picture's bright patches. A monospaced comma and space come
-/// close to the first test, so the second keeps prose whole. Each piece reaches halfway into the
-/// gaps on either side. A glow around the letters counts as blank.
-pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32), chars: usize) -> Vec<(i32, i32, i32, i32)> {
-    let Some(g) = glyphs(bgra, width, height, rect, None) else { return vec![rect] };
+/// each their own label. `text` is what the line was read as: the number of its letters gives
+/// their width; their height can take in a picture's bright patches. A monospaced comma and space
+/// come close to the first test, so the second keeps prose whole. A monospaced font's thin
+/// letters, as in a game's pixel font, leave every space that wide: there a gap must be two
+/// cells wide. Each piece reaches halfway into the gaps on either side. A glow around the
+/// letters counts as blank.
+pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, i32, i32), text: &str) -> Vec<(i32, i32, i32, i32)> {
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let Some(g) = glyphs(bgra, width, height, rect, None).filter(|_| chars > 1) else { return vec![rect] };
     // Without a glow, a thin stem's few pixels can sit nearer the background than the ink.
     let glow = g.letters < g.h;
     let letter = |col: i32, row: i32| {
@@ -374,17 +380,20 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
         if glow { distance(p, g.fg) < distance(p, g.bg) } else { distance(p, g.bg) > GLYPH_DISTANCE }
     };
     let inked = |col: i32| (g.y..g.y + g.h).any(|row| letter(col, row));
-    let (mut gaps, mut blank_from) = (Vec::new(), None); // (start, width)
-    for col in g.x..g.x + g.w {
-        if !inked(col) {
-            blank_from.get_or_insert(col);
-        } else if let Some(start) = blank_from.take().filter(|&start| start > g.x) {
-            gaps.push((start, col - start));
+    let mut runs: Vec<(i32, i32)> = Vec::new(); // each stretch of inked columns, from and to
+    for col in (g.x..g.x + g.w).filter(|&col| inked(col)) {
+        match runs.last_mut() {
+            Some(run) if run.1 == col => run.1 = col + 1,
+            _ => runs.push((col, col + 1)),
         }
     }
+    let gaps: Vec<(i32, i32)> = runs.windows(2).map(|r| (r[0].1, r[1].0 - r[0].1)).collect(); // (start, width)
     let between_words: i32 = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 >= g.letters).sum();
-    let letter_w = (g.w - between_words) / chars.max(1) as i32;
-    let wide = |w: i32| w * 2 >= letter_w * 3;
+    let letter_w = (g.w - between_words) / chars as i32;
+    let mut between_letters: Vec<i32> = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 < g.letters).collect();
+    between_letters.sort_unstable();
+    let cell = fixed_pitch(&runs, between_letters.get(between_letters.len() / 2).copied().unwrap_or(0), text.chars().count());
+    let wide = |w: i32| w * 2 >= letter_w * 3 && cell.map_or(true, |cell| w as f32 >= cell * 2.0);
     let mut spaces: Vec<i32> = gaps.iter().map(|&(_, w)| w).filter(|&w| w * 5 >= g.letters && !wide(w)).collect();
     spaces.sort_unstable();
     let usual = spaces.get(spaces.len() / 2).copied().unwrap_or(0);
@@ -392,6 +401,30 @@ pub fn split_at_gaps(bgra: &[u8], width: usize, height: usize, rect: (i32, i32, 
     let (x, y, w, h) = rect;
     let edges: Vec<i32> = std::iter::once(x).chain(cuts).chain(std::iter::once(x + w)).collect();
     edges.windows(2).map(|e| (e[0], y, e[1] - e[0], h)).collect()
+}
+
+/// The width of a cell, if the stretches of ink sit on a grid of equal cells as a monospaced
+/// font's letters do. `cells` is how many letters and spaces the line was read as: the ink spans
+/// that many cells, less the blank sides of the first and the last. A stretch of two letters run
+/// together sits astride a boundary between cells, one of three in the middle of a cell again.
+fn fixed_pitch(runs: &[(i32, i32)], between_letters: i32, cells: usize) -> Option<f32> {
+    if runs.len() < MONOSPACED_RUNS || cells < 2 {
+        return None;
+    }
+    let span = (runs[runs.len() - 1].1 - runs[0].0) as f32;
+    (0..=20).map(|side| span / (cells as f32 - side as f32 / 20.0)).find(|&cell| {
+        // Where in a cell each stretch's first letter has its middle, as a share of the cell.
+        let middles: Vec<f32> = runs
+            .iter()
+            .map(|&(from, to)| {
+                let letters = ((to - from + between_letters) as f32 / cell).round().max(1.0);
+                (((from + to) as f32 - (letters - 1.0) * cell) / 2.0 / cell).rem_euclid(1.0)
+            })
+            .collect();
+        let apart = |a: f32, b: f32| (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0));
+        let together = middles.iter().map(|&m| middles.iter().filter(|&&other| apart(m, other) <= MONOSPACED_SLACK).count()).max().unwrap_or(0);
+        runs.len() - together <= runs.len() / MONOSPACED_STRAYS
+    })
 }
 
 /// Takes the letters off a picture and leaves the rest of it. The rows just outside the box say
