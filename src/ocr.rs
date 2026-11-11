@@ -229,8 +229,7 @@ impl Ocr {
         if ink.picture && score < PICTURE_TEXT_SCORE {
             return Ok(None);
         }
-        let first_word = text.split(' ').next().unwrap_or("");
-        Ok(patch::glyphs(bgra, w, h, in_frame, Some(first_word))
+        Ok(patch::glyphs(bgra, w, h, in_frame, Some(&text))
             .filter(|_| !text.is_empty())
             .map(|glyphs| (Line { glyphs, text: without_icon(text.clone(), glyphs.icon) }, words)))
     }
@@ -954,6 +953,16 @@ mod tests {
         let (bgra, w, h) = png_bgra("testdata/pixel-mono.png");
         let got: Vec<String> = paragraphs(&ocr.read(&bgra, w, h).unwrap()).into_iter().map(|b| b.text).collect();
         assert_eq!(got, ["Mira", "A little rest never hurt anyone, quite the contrary! You should stay by the fire today."]);
+    }
+
+    /// A monospaced font sets "It" as far from the next word as an icon stands from its label, and
+    /// a line of two words has few letters to tell its grid by.
+    #[test]
+    fn short_words_in_a_monospaced_font_are_neither_icons_nor_labels() {
+        let ocr = Ocr::new(4, &[]).unwrap();
+        let (bgra, w, h) = png_bgra("testdata/mono-short.png");
+        let got: Vec<String> = paragraphs(&ocr.read(&bgra, w, h).unwrap()).into_iter().map(|b| b.text).collect();
+        assert_eq!(got, ["It is still a little chilly in the hall.", "I see.", "Why me?"]);
     }
 
     #[test]
