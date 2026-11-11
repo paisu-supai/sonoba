@@ -55,6 +55,11 @@ impl Translator {
     }
 
     /// Picks up the languages in the settings, which may have changed since the last frame.
+    /// Whether what comes on screen goes into the history.
+    pub fn keeps_history(&self) -> bool {
+        self.keep_history
+    }
+
     pub fn follow_languages(&mut self) {
         let config = config::get();
         let wording = Wording { target: config.target, form: config.form, glossary: config.glossary };
@@ -156,9 +161,6 @@ impl Translator {
             }
             cache.insert(source.to_string(), translation.to_string());
             drop(cache);
-            if this.keep_history {
-                remember(source, translation);
-            }
             done(source, translation);
         };
         std::thread::scope(|scope| {
@@ -404,7 +406,7 @@ fn terms_in<'a>(text: &str, glossary: &'a [(String, String)]) -> Vec<&'a (String
     glossary.iter().filter(|(from, to)| !from.is_empty() && !to.is_empty() && text.contains(&from.to_lowercase())).collect()
 }
 
-fn remember(source: &str, translation: &str) {
+pub fn remember(source: &str, translation: &str) {
     let mut history = HISTORY.lock().unwrap();
     if history.front().is_some_and(|(s, _)| s == source) {
         return;
