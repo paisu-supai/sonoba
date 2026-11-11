@@ -1,6 +1,8 @@
 //! The models: PLaMo 3 Translate in its four sizes and Hy-MT2, plus any GGUF file dropped into the folder.
 
 use serde_json::Value;
+use std::collections::HashMap;
+use std::io::{BufReader, Read, Seek};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -52,14 +54,82 @@ pub enum Format {
     Chat, // anything else: the template inside the GGUF file, plus a request to translate
 }
 
+/// The file says what it is in its own header, whatever another app has named it. A header that
+/// does not say (Tencent's Hy-MT2 calls itself "1.8B") leaves it to the file name.
 pub fn format_of(file: &str) -> Format {
-    if file.starts_with("plamo-3-translate") {
-        Format::Plamo
-    } else if file.to_ascii_lowercase().starts_with("hy-mt") {
-        Format::HyMt
-    } else {
-        Format::Chat
+    static KNOWN: Mutex<Option<HashMap<PathBuf, Format>>> = Mutex::new(None);
+    let path = path(file);
+    let mut known = KNOWN.lock().unwrap();
+    let known = known.get_or_insert_with(HashMap::new);
+    if let Some(format) = known.get(&path) {
+        return *format;
     }
+    let names = std::fs::File::open(&path).ok().and_then(|f| names_inside(BufReader::new(f)));
+    let format = format_from(names.as_deref().unwrap_or(""), file);
+    if names.is_some() {
+        known.insert(path, format); // a file that is not there yet is read once it is
+    }
+    format
+}
+
+fn format_from(names: &str, file: &str) -> Format {
+    let kind = |text: &str| {
+        let text = text.to_lowercase().replace([' ', '_'], "-");
+        if text.contains("plamo-3-translate") {
+            Some(Format::Plamo)
+        } else if text.contains("hy-mt") {
+            Some(Format::HyMt)
+        } else {
+            None
+        }
+    };
+    kind(names).or_else(|| kind(file)).unwrap_or(Format::Chat)
+}
+
+/// The model's name, base name and base model from a GGUF header, or None for a file that is not GGUF.
+fn names_inside(mut file: impl Read + Seek) -> Option<String> {
+    const WANTED: [&str; 3] = ["general.name", "general.basename", "general.base_model.0.name"];
+    const SIZES: [i64; 13] = [1, 1, 2, 2, 4, 4, 4, 1, 0, 0, 8, 8, 8]; // by value type; 8 is a string, 9 an array
+    const STRING: u32 = 8;
+    const ARRAY: u32 = 9;
+    fn number<const N: usize>(file: &mut impl Read) -> Option<[u8; N]> {
+        let mut bytes = [0; N];
+        file.read_exact(&mut bytes).ok().map(|_| bytes)
+    }
+    fn length(file: &mut impl Read) -> Option<u64> {
+        number(file).map(u64::from_le_bytes).filter(|n| *n < 1 << 24) // more is not a header
+    }
+    fn text(file: &mut impl Read) -> Option<String> {
+        let mut bytes = vec![0; length(file)? as usize];
+        file.read_exact(&mut bytes).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+    if &number::<4>(&mut file)? != b"GGUF" {
+        return None;
+    }
+    file.seek_relative(4 + 8).ok()?; // the version, and the number of tensors
+    let mut names = String::new();
+    for _ in 0..length(&mut file)? {
+        let Some(key) = text(&mut file) else { break };
+        let Some(kind) = number(&mut file).map(u32::from_le_bytes) else { break };
+        let skipped = match kind {
+            STRING if WANTED.contains(&key.as_str()) => text(&mut file).map(|name| names = format!("{names} {name}")),
+            STRING => length(&mut file).and_then(|n| file.seek_relative(n as i64).ok()),
+            ARRAY => (|| {
+                let (of, count) = (u32::from_le_bytes(number(&mut file)?), u64::from_le_bytes(number(&mut file)?));
+                match of {
+                    STRING => (0..count).try_for_each(|_| length(&mut file).and_then(|n| file.seek_relative(n as i64).ok())),
+                    ARRAY => None,
+                    _ => file.seek_relative(*SIZES.get(of as usize)? * i64::try_from(count).ok()?).ok(),
+                }
+            })(),
+            _ => SIZES.get(kind as usize).and_then(|size| file.seek_relative(*size).ok()),
+        };
+        if skipped.is_none() {
+            break; // what was read so far still counts
+        }
+    }
+    Some(names)
 }
 
 /// The PLaMo Community License binds whoever uses a PLaMo model, and nobody else.
@@ -231,6 +301,55 @@ mod tests {
         assert_eq!(format_of("plamo-3-translate-8b-Q3_K_M.gguf"), Format::Plamo);
         assert_eq!(format_of("Hy-MT2-1.8B-Q4_K_M.gguf"), Format::HyMt);
         assert_eq!(format_of("gemma-4-q4.gguf"), Format::Chat);
+    }
+
+    /// A GGUF header with these values, laid out as llama.cpp writes it.
+    fn header(values: &[(&str, Option<&str>)]) -> std::io::Cursor<Vec<u8>> {
+        let text = |s: &str| [&(s.len() as u64).to_le_bytes()[..], s.as_bytes()].concat();
+        let mut bytes = [&b"GGUF"[..], &3u32.to_le_bytes(), &0u64.to_le_bytes(), &(values.len() as u64).to_le_bytes()].concat();
+        for (key, value) in values {
+            bytes.extend(text(key));
+            match value {
+                Some(value) => bytes.extend([&8u32.to_le_bytes()[..], &text(value)].concat()),
+                // a vocabulary of two words, then a number: both are stepped over
+                None => bytes.extend([&9u32.to_le_bytes()[..], &8u32.to_le_bytes(), &2u64.to_le_bytes(), &text("a"), &text("bc")].concat()),
+            }
+        }
+        std::io::Cursor::new(bytes)
+    }
+
+    #[test]
+    fn the_name_inside_the_file_decides_before_the_file_name() {
+        let plamo = header(&[("general.architecture", Some("plamo3")), ("general.name", Some("plamo-3-translate-2b")), ("tokenizer.ggml.tokens", None)]);
+        assert_eq!(format_from(&names_inside(plamo).unwrap(), "model.gguf"), Format::Plamo);
+        let after_the_words = header(&[("tokenizer.ggml.tokens", None), ("general.base_model.0.name", Some("PLaMo 3 Translate 2B"))]);
+        assert_eq!(format_from(&names_inside(after_the_words).unwrap(), "shared.gguf"), Format::Plamo);
+        let tencent = header(&[("general.architecture", Some("hunyuan-dense")), ("general.name", Some("1.8B"))]);
+        assert_eq!(format_from(&names_inside(tencent).unwrap(), "Hy-MT2-1.8B-Q4_K_M.gguf"), Format::HyMt);
+        let other = header(&[("general.name", Some("Qwen3 4B"))]);
+        assert_eq!(format_from(&names_inside(other).unwrap(), "qwen3-4b.gguf"), Format::Chat);
+        assert_eq!(format_from(&names_inside(header(&[("general.name", Some("Hy-MT2 1.8B"))])).unwrap(), "plamo-3-translate-x.gguf"), Format::HyMt);
+    }
+
+    /// What the real files in a folder say: MODELS_IN=<folder> cargo test real_models -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_models() {
+        for file in std::fs::read_dir(std::env::var("MODELS_IN").unwrap()).unwrap().flatten().filter(|f| f.path().extension().is_some_and(|e| e == "gguf")) {
+            let started = std::time::Instant::now();
+            let names = names_inside(BufReader::new(std::fs::File::open(file.path()).unwrap()));
+            let format = format_from(names.as_deref().unwrap_or(""), "x.gguf");
+            println!("{} -> {names:?}, without its file name {format:?}, {:.1} ms", file.file_name().to_string_lossy(), started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_gguf_or_is_cut_short_falls_back_to_its_name() {
+        assert_eq!(names_inside(std::io::Cursor::new(b"not a model".to_vec())), None);
+        let mut cut = header(&[("general.name", Some("plamo-3-translate-2b")), ("general.basename", Some("plamo"))]).into_inner();
+        cut.truncate(cut.len() - 3);
+        assert_eq!(format_from(&names_inside(std::io::Cursor::new(cut)).unwrap(), "x.gguf"), Format::Plamo);
+        assert_eq!(format_from("", "pfnet_PLaMo-3-Translate-2b.Q4_K_M.gguf"), Format::Plamo);
     }
 
     #[test]
