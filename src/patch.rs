@@ -19,6 +19,7 @@ const GLOW_PER_HEIGHT: usize = 8; // and from big ones: an eighth of the patch's
 const SMOOTHING: usize = 4; // passes over a painted-out letter, so that no outline of it shows
 const SAME_BG: i32 = 30;
 const SAME_FG: i32 = 80; // thin text rarely reaches its true colour, so allow for that
+const OWN_FG: i32 = 30; // somewhere in a letter, though, a pixel comes this close to it
 const BOLD_STEM: usize = 8; // a stem wider than 1/8 of the line height, less one antialiased pixel
 const MIN_BOLD_STEM: usize = 4; // a regular stem in small text is one pixel and its two antialiased edges
 const STATUS_BG: u32 = 0x00201C1C;
@@ -438,6 +439,42 @@ fn fixed_pitch(runs: &[(i32, i32)], tall: i32, cells: usize) -> Option<f32> {
     })
 }
 
+/// The pixels of the box in the letters' colour, less the picture's own: a lantern or a petal can
+/// be nearly as bright as the letters, and everything near it would be painted out with them.
+/// Letters keep to their box and come right up to their colour; a stretch of touching pixels that
+/// never does, and that runs on past the box's edge, belongs to the picture.
+fn letters_ink(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (usize, usize, usize, usize), fg: [i32; 3]) -> Vec<bool> {
+    let like = |col: usize, row: usize, within: i32| distance(pixel(bgra, width, col, row), fg) <= within;
+    let mut ink: Vec<bool> = (0..w * h).map(|i| like(x + i % w, y + i / w, SAME_FG)).collect();
+    let mut seen = vec![false; w * h];
+    for start in 0..w * h {
+        if !ink[start] || seen[start] {
+            continue;
+        }
+        let (mut stretch, mut todo, mut own, mut beyond) = (Vec::new(), vec![start], false, false);
+        seen[start] = true;
+        while let Some(i) = todo.pop() {
+            stretch.push(i);
+            let (col, row) = (i % w, i / w);
+            own |= like(x + col, y + row, OWN_FG);
+            beyond |= (col == 0 && x > 0 && like(x - 1, y + row, SAME_FG))
+                || (col + 1 == w && x + w < width && like(x + w, y + row, SAME_FG))
+                || (row == 0 && y > 0 && like(x + col, y - 1, SAME_FG))
+                || (row + 1 == h && y + h < height && like(x + col, y + h, SAME_FG));
+            for j in (row.saturating_sub(1)..(row + 2).min(h)).flat_map(|r| (col.saturating_sub(1)..(col + 2).min(w)).map(move |c| r * w + c)) {
+                if ink[j] && !seen[j] {
+                    seen[j] = true;
+                    todo.push(j);
+                }
+            }
+        }
+        if beyond && !own {
+            stretch.into_iter().for_each(|i| ink[i] = false);
+        }
+    }
+    ink
+}
+
 /// Takes the letters off a picture and leaves the rest of it. The rows just outside the box say
 /// what lies behind the text, and a pixel far from that is a letter, or its glow, if it is near
 /// a pixel of the letters' colour: a dark sleeve beside a label is the picture.
@@ -480,7 +517,7 @@ fn paint_out_letters(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (us
     // The colour taken for the letters can be their shadow's, so a thick stroke's far side is as
     // far from it as the stroke is wide.
     let reach = (h / GLOW_PER_HEIGHT).max(GLOW_PX);
-    let ink: Vec<bool> = (0..w * h).map(|i| distance(pixel(bgra, width, x + i % w, y + i / w), fg) <= SAME_FG).collect();
+    let ink = letters_ink(bgra, width, height, (x, y, w, h), fg);
     let mut letter = vec![false; w * h];
     for row in 0..h {
         for col in 0..w {
@@ -1066,6 +1103,43 @@ mod tests {
         let b = paint_out_letters(&img, w, h, (10, 16, 180, 28), [255; 3]);
         let at = |x: usize, y: usize| pixel(&b.bgra, 180, x - 10, y - 16);
         assert!(distance(at(23, 36), lavender.map(i32::from)) < 40, "{:?}", at(23, 36));
+    }
+
+    /// A lantern's bright stripes run down through a name's box, a little off the letters' white.
+    #[test]
+    fn a_bright_shape_that_runs_on_past_the_box_stays_in_the_picture() {
+        let (w, h) = (200usize, 80usize);
+        let (night, lantern) = ([70, 40, 30], [230, 235, 240]);
+        let mut img = canvas(w, h, night);
+        paint(&mut img, w, (30, 0, 36, 80), lantern, 1);
+        paint(&mut img, w, (39, 0, 45, 80), lantern, 1);
+        paint(&mut img, w, (70, 30, 150, 50), WHITE, 3);
+        let b = paint_out_letters(&img, w, h, (20, 26, 160, 28), [255; 3]);
+        let at = |x: usize, y: usize| pixel(&b.bgra, 160, x - 20, y - 26);
+        for (x, y) in [(31, 28), (33, 40), (42, 52)] {
+            assert_eq!(at(x, y), lantern.map(i32::from), "the lantern at {x},{y}");
+        }
+        for x in (70..150).step_by(3) {
+            assert!(distance(at(x, 40), night.map(i32::from)) < 40, "a letter is left at {x}: {:?}", at(x, 40));
+        }
+    }
+
+    /// Letters are not taken for the picture: not those cut by the box, as a tall title's are, nor
+    /// a word in another colour, nor the ones a bright part of the picture touches.
+    #[test]
+    fn letters_that_reach_the_edge_or_are_off_colour_still_go() {
+        let (w, h) = (200usize, 80usize);
+        let (night, tinted, cloud) = ([70, 40, 30], [240, 235, 230], [235, 240, 235]);
+        let mut img = canvas(w, h, night);
+        paint(&mut img, w, (30, 10, 34, 50), WHITE, 1); // a tall letter, up through the box's top
+        paint(&mut img, w, (60, 30, 100, 50), tinted, 3); // a word a shade off, all inside the box
+        paint(&mut img, w, (120, 30, 124, 50), WHITE, 1);
+        paint(&mut img, w, (124, 36, 200, 40), cloud, 1); // a cloud from that letter out past the box
+        let b = paint_out_letters(&img, w, h, (20, 26, 160, 28), [255; 3]);
+        let at = |x: usize, y: usize| pixel(&b.bgra, 160, x - 20, y - 26);
+        for (x, y) in [(31, 30), (32, 45), (60, 40), (96, 34), (121, 32), (122, 48)] {
+            assert!(distance(at(x, y), night.map(i32::from)) < 40, "a letter is left at {x},{y}: {:?}", at(x, y));
+        }
     }
 
     #[test]
