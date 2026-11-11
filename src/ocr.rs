@@ -188,16 +188,26 @@ impl Ocr {
         // letters it was read as tell how wide a gap must be to part two labels. The recogniser
         // can leave the space out of a wide gap too, as in "BackSave".
         let read_box = |rect: (usize, usize, usize, usize)| -> Result<Vec<Line>, String> {
-            let Some(line) = self.read_line(bgra, &img, (w, h), rect)? else { return Ok(Vec::new()) };
+            let Some((line, words)) = self.read_line(bgra, &img, (w, h), rect)? else { return Ok(Vec::new()) };
             let chars = line.text.chars().filter(|c| !c.is_whitespace()).count();
             let (x, y, bw, bh) = rect;
-            let pieces = if chars > 1 { patch::split_at_gaps(bgra, w, h, (x as i32 - pad, y as i32 - pad, bw as i32, bh as i32), chars) } else { Vec::new() };
-            if pieces.len() < 2 {
+            let (left, top) = (x as i32 - pad, y as i32 - pad);
+            let mut cuts: Vec<i32> = if chars > 1 { patch::split_at_gaps(bgra, w, h, (left, top, bw as i32, bh as i32), chars).iter().skip(1).map(|piece| piece.0).collect() } else { Vec::new() };
+            // Over a bright picture some gaps are not blank; where the recogniser put each letter
+            // still shows them. Both ways can find the same gap.
+            if !line.glyphs.icon {
+                cuts.extend(wide_gaps(&words).into_iter().map(|share| left + (share * bw as f32) as i32));
+            }
+            cuts.sort_unstable();
+            cuts.dedup_by(|later, kept| (*later - *kept) * 2 < bh as i32);
+            if cuts.is_empty() {
                 return Ok(vec![line]);
             }
+            let edges: Vec<i32> = std::iter::once(left).chain(cuts).chain(std::iter::once(left + bw as i32)).collect();
+            let pieces = edges.windows(2).map(|e| (e[0], top, e[1] - e[0], bh as i32));
             let mut out = Vec::new();
             for (px, py, pw, ph) in pieces {
-                out.extend(self.read_line(bgra, &img, (w, h), ((px + pad) as usize, (py + pad) as usize, pw as usize, ph as usize))?);
+                out.extend(self.read_line(bgra, &img, (w, h), ((px + pad) as usize, (py + pad) as usize, pw as usize, ph as usize))?.map(|(line, _)| line));
             }
             Ok(out)
         };
@@ -207,7 +217,7 @@ impl Ocr {
         Ok(lines)
     }
 
-    fn read_line(&self, bgra: &[u8], img: &Rgbf, (w, h): (usize, usize), rect: (usize, usize, usize, usize)) -> Result<Option<Line>, String> {
+    fn read_line(&self, bgra: &[u8], img: &Rgbf, (w, h): (usize, usize), rect: (usize, usize, usize, usize)) -> Result<Option<(Line, Words)>, String> {
         let (x, y, bw, bh) = rect;
         let in_frame = (x as i32 - PAD as i32, y as i32 - PAD as i32, bw as i32, bh as i32);
         let Some(ink) = patch::glyphs(bgra, w, h, in_frame, None) else { return Ok(None) };
@@ -215,7 +225,7 @@ impl Ocr {
         let margin = (ink.h / 2) as usize;
         let top = ((ink.y + PAD as i32) as usize).saturating_sub(margin).max(y);
         let bottom = ((ink.y + ink.h + PAD as i32) as usize + margin).min(y + bh);
-        let (text, score) = self.recognize(img, (x, top, bw, bottom.saturating_sub(top)))?;
+        let (text, score, words) = self.recognize(img, (x, top, bw, bottom.saturating_sub(top)))?;
         // A lattice, a leaf pattern or a scene's detail can pass for a few letters, but reads unsure.
         if ink.picture && score < PICTURE_TEXT_SCORE {
             return Ok(None);
@@ -223,7 +233,7 @@ impl Ocr {
         let first_word = text.split(' ').next().unwrap_or("");
         Ok(patch::glyphs(bgra, w, h, in_frame, Some(first_word))
             .filter(|_| !text.is_empty())
-            .map(|glyphs| Line { glyphs, text: without_icon(text.clone(), glyphs.icon) }))
+            .map(|glyphs| (Line { glyphs, text: without_icon(text.clone(), glyphs.icon) }, words)))
     }
 
     fn detect(&self, img: &Rgbf) -> Result<Vec<(usize, usize, usize, usize)>, String> {
@@ -251,21 +261,21 @@ impl Ocr {
     }
 
     /// The text in `rect` and how sure the reading is.
-    fn recognize(&self, img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32), String> {
+    fn recognize(&self, img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32, Words), String> {
         let (x, y, bw, bh) = rect;
         if bw == 0 || bh == 0 {
-            return Ok((String::new(), 0.0));
+            return Ok((String::new(), 0.0, Vec::new()));
         }
-        let (mut text, mut score) = self.read_with(&self.rec, &self.chars, img, rect)?;
+        let (mut text, mut score, mut words) = self.read_with(&self.rec, &self.chars, img, rect)?;
         // An ascender close under the box's edge can read as an accent, "Online" as "Oníine". A
         // little more room above and below settles it, and the surer reading wins.
         let accented = |c: char| ('\u{C0}'..='\u{24F}').contains(&c) && c.is_alphabetic();
         if score < ROOMY_SCORE && text.chars().any(accented) {
             let room = bh / 6;
             let roomy = (x, y.saturating_sub(room), bw, (bh + room * 2).min(img.h - y.saturating_sub(room)));
-            let (again, again_score) = self.read_with(&self.rec, &self.chars, img, roomy)?;
+            let (again, again_score, again_words) = self.read_with(&self.rec, &self.chars, img, roomy)?;
             if again_score > score {
-                (text, score) = (again, again_score);
+                (text, score, words) = (again, again_score, again_words);
             }
         }
         // Other scripts read badly in the main model, so doubt is what sends a line to their
@@ -278,7 +288,7 @@ impl Ocr {
             let (mut best, mut best_score) = (None, if too_short { 0.0 } else { score });
             for i in (0..self.others.len()).map(|i| (i + first) % self.others.len()) {
                 let (script, model, chars) = &self.others[i];
-                let (other, other_score) = self.read_with(model, chars, img, rect)?;
+                let (other, other_score, _) = self.read_with(model, chars, img, rect)?;
                 if other_score > best_score && script.wrote(&other, other_score) {
                     (best, best_score) = (Some((i, if script.right_to_left { logical_order(&other) } else { other })), other_score);
                     if other_score >= SURE_SCORE {
@@ -288,13 +298,13 @@ impl Ocr {
             }
             if let Some((i, other)) = best {
                 self.last.store(i, Ordering::Relaxed);
-                return Ok((other, best_score));
+                return Ok((other, best_score, Vec::new()));
             }
         }
-        Ok(if score < TEXT_SCORE { (String::new(), 0.0) } else { (text, score) })
+        Ok(if score < TEXT_SCORE { (String::new(), 0.0, Vec::new()) } else { (text, score, words) })
     }
 
-    fn read_with(&self, model: &Model, chars: &[&str], img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32), String> {
+    fn read_with(&self, model: &Model, chars: &[&str], img: &Rgbf, rect: (usize, usize, usize, usize)) -> Result<(String, f32, Words), String> {
         let (_, _, bw, bh) = rect;
         let width = (bw * REC_HEIGHT).div_ceil(bh).clamp(1, REC_MAX_WIDTH);
         let stride = width.max(REC_MIN_WIDTH);
@@ -304,7 +314,10 @@ impl Ocr {
         if shape[2] != chars.len() {
             return Err(format!("model has {} classes, dictionary {}", shape[2], chars.len()));
         }
-        Ok(ctc_decode(&probs, shape[2], chars))
+        let (text, score, words) = ctc_decode(&probs, shape[2], chars);
+        // The steps span the padded input; the line fills `width` of it.
+        let to_box = stride as f32 / width as f32;
+        Ok((text, score, words.into_iter().map(|(a, b, n)| (a * to_box, b * to_box, n)).collect()))
     }
 }
 
@@ -372,19 +385,47 @@ fn logical_order(text: &str) -> String {
     runs.concat()
 }
 
-/// The text, and how sure the model was of it.
-fn ctc_decode(probs: &[f32], classes: usize, chars: &[&str]) -> (String, f32) {
+/// Each word's first and last letter, as shares of the line's width, and its number of letters.
+type Words = Vec<(f32, f32, usize)>;
+
+/// The text, how sure the model was of it, and where its words are.
+fn ctc_decode(probs: &[f32], classes: usize, chars: &[&str]) -> (String, f32, Words) {
     let (mut text, mut sum, mut n, mut prev) = (String::new(), 0f32, 0f32, 0);
-    for step in probs.chunks_exact(classes) {
+    let steps = (probs.len() / classes.max(1)).max(1) as f32;
+    let (mut words, mut word): (Words, Option<(f32, f32, usize)>) = (Vec::new(), None);
+    for (i, step) in probs.chunks_exact(classes).enumerate() {
         let (best, &p) = step.iter().enumerate().fold((0, &step[0]), |a, b| if b.1 > a.1 { b } else { a });
         if best != 0 && best != prev {
             text.push_str(chars[best]);
             sum += p;
             n += 1.0;
+            let at = (i as f32 + 0.5) / steps;
+            match (chars[best] == " ", &mut word) {
+                (true, _) => words.extend(word.take()),
+                (false, Some(w)) => (w.1, w.2) = (at, w.2 + 1),
+                (false, None) => word = Some((at, at, 1)),
+            }
         }
         prev = best;
     }
-    if n == 0.0 { (String::new(), 0.0) } else { (text.trim().to_string(), sum / n) }
+    words.extend(word);
+    if n == 0.0 { (String::new(), 0.0, Vec::new()) } else { (text.trim().to_string(), sum / n, words) }
+}
+
+/// Where to cut a line at gaps far wider than a space, such as between a menu bar's items, as
+/// shares of its width. A space is about two letters' pitch from letter to letter, a wide one in
+/// justified text three; four, and half as wide again as the line's usual space, is a gap between
+/// labels. Justified text spaces its words evenly, so none stands out by half.
+fn wide_gaps(words: &[(f32, f32, usize)]) -> Vec<f32> {
+    // Of two middle values, `lower` takes the lower: a menu's tight gaps count as its usual space.
+    let middle = |mut v: Vec<f32>, lower: bool| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len().saturating_sub(lower as usize) / 2).copied()
+    };
+    let Some(pitch) = middle(words.iter().filter(|w| w.2 > 1).map(|w| (w.1 - w.0) / (w.2 - 1) as f32).collect(), false) else { return Vec::new() };
+    let gaps: Vec<f32> = words.windows(2).map(|w| w[1].0 - w[0].1).collect();
+    let usual = middle(gaps.iter().copied().filter(|&g| g < pitch * 4.0).collect(), true).unwrap_or(pitch * 2.0);
+    words.windows(2).zip(&gaps).filter(|&(_, &g)| g >= pitch * 4.0 && g >= usual * 1.5).map(|(w, _)| (w[0].1 + w[1].0) / 2.0).collect()
 }
 
 /// The recogniser reads an icon as a stray character or two, such as a circled digit.
@@ -479,6 +520,7 @@ pub fn paragraphs(lines: &[Line]) -> Vec<Block> {
         }
     }
     match_rows(&mut out);
+    match_columns(&mut out);
     out
 }
 
@@ -499,20 +541,7 @@ fn match_rows(blocks: &mut [Block]) {
         let colours = ga.same_style(gb) || (ga.picture && gb.picture) || ((ga.picture || gb.picture) && ga.same_fg(gb));
         a.lines == 1 && b.lines == 1 && aligned && colours && gap <= h * ROW_GAP
     };
-    let mut row: Vec<usize> = (0..blocks.len()).collect(); // each block's row, named by one of its blocks
-    for i in 0..blocks.len() {
-        for j in i + 1..blocks.len() {
-            if row[i] != row[j] && alike(&blocks[i], &blocks[j]) {
-                let (keep, gone) = (row[i], row[j]);
-                row.iter_mut().filter(|r| **r == gone).for_each(|r| *r = keep);
-            }
-        }
-    }
-    for name in 0..blocks.len() {
-        let members: Vec<usize> = (0..blocks.len()).filter(|&i| row[i] == name).collect();
-        if members.len() < 2 {
-            continue;
-        }
+    for members in groups(blocks, alike).into_iter().filter(|m| m.len() > 1) {
         let mut ems: Vec<i32> = members.iter().map(|&i| blocks[i].em).collect();
         ems.sort_unstable();
         let middle = ems[ems.len() / 2];
@@ -526,6 +555,46 @@ fn match_rows(blocks: &mut [Block]) {
             }
         }
     }
+}
+
+/// Labels stacked in a column in the same colours and weight, such as a settings screen's
+/// headings, share one size as well. They line up at the left or the middle, and three at least
+/// make a column. Only a size near the middle one moves: a speaker's name over a line of dialogue,
+/// or a heading over body text, differs by more, or in weight.
+fn match_columns(blocks: &mut [Block]) {
+    const NEAR_PERCENT: i32 = 15;
+    let alike = |a: &Block, b: &Block| {
+        let (ga, gb) = (&a.glyphs, &b.glyphs);
+        let h = ga.h.max(gb.h);
+        let aligned = (ga.x - gb.x).abs() * 2 <= h || (ga.x * 2 + ga.w - gb.x * 2 - gb.w).abs() <= h;
+        let gap = (ga.y.max(gb.y) - (ga.y + ga.h).min(gb.y + gb.h)).max(0);
+        let colours = ga.same_style(gb) || ((ga.picture || gb.picture) && ga.same_fg(gb));
+        a.lines == 1 && b.lines == 1 && a.bold == b.bold && aligned && colours && gap <= h * ROW_GAP
+    };
+    for members in groups(blocks, alike).into_iter().filter(|m| m.len() > 2) {
+        let mut ems: Vec<i32> = members.iter().map(|&i| blocks[i].em).collect();
+        ems.sort_unstable();
+        let middle = ems[ems.len() / 2];
+        for i in members {
+            if (blocks[i].em - middle).abs() * 100 <= middle * NEAR_PERCENT {
+                blocks[i].em = middle;
+            }
+        }
+    }
+}
+
+/// Blocks chained by `alike`, each group in reading order.
+fn groups(blocks: &[Block], alike: impl Fn(&Block, &Block) -> bool) -> Vec<Vec<usize>> {
+    let mut group: Vec<usize> = (0..blocks.len()).collect(); // each block's group, named by one of its blocks
+    for i in 0..blocks.len() {
+        for j in i + 1..blocks.len() {
+            if group[i] != group[j] && alike(&blocks[i], &blocks[j]) {
+                let (keep, gone) = (group[i], group[j]);
+                group.iter_mut().filter(|g| **g == gone).for_each(|g| *g = keep);
+            }
+        }
+    }
+    (0..blocks.len()).map(|name| (0..blocks.len()).filter(|&i| group[i] == name).collect()).filter(|m: &Vec<usize>| !m.is_empty()).collect()
 }
 
 /// Japanese and Chinese wrap anywhere, with no space to put back.
@@ -557,7 +626,10 @@ fn continues(line_a: &Line, line_b: &Line, para_right: i32, around_right: i32) -
     // Over a picture the background differs from line to line, and a short word may happen to sit
     // on a flat stretch of it; the letters' colour does not differ.
     let alike = a.same_style(b) || ((a.picture || b.picture) && a.same_fg(b));
-    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !alike {
+    // A wrapped line was full; a menu item that happens to end where the dialogue below ends is
+    // far shorter than the dialogue.
+    let filled = a.w * 2 >= b.w;
+    if same_row(a, b) || gap * 10 > h * 11 || !similar_height || !same_column || !lined_up || !alike || !filled {
         return false;
     }
     // A hard line break: b's first word would have fitted on a, so nothing forced a wrap.
@@ -611,6 +683,9 @@ mod tests {
     #[test]
     fn a_menu_bar_does_not_run_into_the_dialogue_below() {
         let lines = [l(530, 0, 240, "Save Q.Save Q.Load Skip"), l(0, 24, 700, "Then, why didn't you use your hiding skills to hide from the guards?")];
+        assert_eq!(paragraphs(&lines).len(), 2);
+        // One item ending where the dialogue ends, over a line the reader caught without its "I".
+        let lines = [l(660, 0, 40, "Auto"), l(0, 24, 700, "wouldn't call it strange, Machiko-san. It's this world that's weird.")];
         assert_eq!(paragraphs(&lines).len(), 2);
     }
 
@@ -733,6 +808,26 @@ mod tests {
         reading_order(&mut lines);
         let order: Vec<_> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(order, ["left", "right", "below"]);
+    }
+
+    #[test]
+    fn a_menu_bar_is_cut_where_its_letters_are_far_apart() {
+        // Letters 0.02 apart: "Q.Load Skip" a little wider than a space, then two wide gaps.
+        let word = |start: f32, letters: usize| (start, start + 0.02 * (letters - 1) as f32, letters);
+        let menu = [word(0.0, 6), word(0.15, 4), word(0.36, 4), word(0.58, 5)];
+        let cuts = wide_gaps(&menu);
+        assert_eq!(cuts.len(), 2, "{cuts:?}");
+        assert!(cuts[0] > 0.21 && cuts[0] < 0.36 && cuts[1] > 0.42 && cuts[1] < 0.58, "{cuts:?}");
+        // Prose, and justified prose whose spaces are wide: whole.
+        let prose = [word(0.0, 4), word(0.1, 3), word(0.18, 5), word(0.3, 2)];
+        assert!(wide_gaps(&prose).is_empty());
+        let justified = [word(0.0, 4), word(0.12, 3), word(0.22, 5), word(0.36, 2)];
+        assert!(wide_gaps(&justified).is_empty());
+        // A game's menu, as read: items two and a half to five and a half letters apart.
+        let game = [(0.054, 0.177, 6), (0.254, 0.377, 6), (0.454, 0.531, 4), (0.669, 0.746, 4), (0.869, 0.962, 5)];
+        assert_eq!(wide_gaps(&game).len(), 2, "Skip | Auto | Prefs");
+        let game = [(0.042, 0.178, 6), (0.263, 0.381, 6), (0.449, 0.534, 4), (0.669, 0.754, 4), (0.873, 0.975, 5)];
+        assert_eq!(wide_gaps(&game).len(), 2, "Skip | Auto | Prefs");
     }
 
     #[test]
@@ -870,6 +965,22 @@ mod tests {
         match_rows(&mut row);
         let got: Vec<_> = row.iter().map(|b| (b.em, b.bold)).collect();
         assert_eq!(got, [(17, true), (17, true), (17, true), (12, false), (19, true)]);
+    }
+
+    /// A settings screen's headings in a script font, one under another; a speaker's name over a
+    /// line of dialogue in the same colour is no column of labels.
+    #[test]
+    fn labels_in_a_column_share_size() {
+        let block = |x, y, em| {
+            let glyphs = Glyphs { x, y, w: 120, h: 44, letters: 30, bg: [60, 40, 90], fg: [255; 3], stem: 2, icon: false, picture: true };
+            Block { glyphs, lines: 1, em, bold: false, text: "x".into() }
+        };
+        let mut column = [block(165, 242, 41), block(166, 387, 38), block(160, 500, 47), block(150, 613, 42)];
+        match_columns(&mut column);
+        assert_eq!(column.map(|b| b.em), [42, 42, 42, 42]);
+        let mut talk = [block(20, 0, 28), block(22, 50, 23), block(20, 100, 23)];
+        match_columns(&mut talk);
+        assert_eq!(talk.map(|b| b.em), [28, 23, 23]);
     }
 
     fn with_korean() -> Ocr {

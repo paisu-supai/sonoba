@@ -71,6 +71,7 @@ pub struct Patch {
     pub y: i32,
     pub w: i32,
     pub max_w: i32, // how far a single line may spread over empty background
+    pub max_h: i32, // how far a paragraph may grow down over empty background
     pub one_line: bool, // the original is one line, so the translation narrows before it wraps
     pub h: i32,     // 0 until laid out for a status message
     pub em: i32,    // the original's font size, which the translation tries to keep
@@ -483,9 +484,15 @@ impl Patch {
         let empty = |col: usize| rows.clone().all(|row| distance(pixel(bgra, width, col, row), g.bg) <= GLYPH_DISTANCE);
         let free = ((g.x + g.w) as usize..width).find(|&col| !empty(col)).unwrap_or(width) as i32;
         let max_w = if block.lines == 1 { (free - MARGIN - x).max(w) } else { w };
+        // A paragraph wraps at words, so its translation can take a line more than the original;
+        // the gap under it, if it is plain background, takes that line, up to its middle so that
+        // the next paragraph still stands apart.
+        let blank_row = |row: usize| (g.x as usize..(g.x + g.w) as usize).all(|col| distance(pixel(bgra, width, col, row), g.bg) <= GLYPH_DISTANCE);
+        let below = ((g.y + g.h) as usize..height).find(|&row| !blank_row(row)).unwrap_or(height) as i32;
+        let max_h = if block.lines > 1 && !g.picture { (g.y + g.h + (below - g.y - g.h) / 2 - y).max(h) } else { h };
         let (bg, fg) = (colorref(g.bg), colorref(g.fg));
         let seen = Seen::of(bgra, width, (x, y, w, h));
-        Self { x, y, w, max_w, one_line: block.lines == 1, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, seen, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
+        Self { x, y, w, max_w, max_h, one_line: block.lines == 1, h, em: block.em, bg, fg, bold: block.bold, backdrop: None, seen, text, source: block.text.clone(), px: 0, narrow: 100, text_h: 0 }
     }
 
     /// On a still picture the text goes without the picture going with it. A video would move on
@@ -633,6 +640,7 @@ impl Patch {
             y: 0,
             w: width,
             max_w: width,
+            max_h: 0,
             one_line: false,
             h: 0,
             em: 0,
