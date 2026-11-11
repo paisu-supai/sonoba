@@ -22,6 +22,7 @@ mod translate;
 use i18n::t;
 use patch::{Backdrop, KEY_COLOR, Patch, WOBBLE_PERCENT};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -51,6 +52,7 @@ const SETTLE: Duration = Duration::from_millis(300);
 const OCR_IDLE: Duration = Duration::from_secs(60); // free the OCR models this long after the last job
 const ENGINE_IDLE: Duration = Duration::from_secs(15 * 60); // and the model after this long
 const MAX_REST: Duration = Duration::from_millis(500); // the longest pause between frames that keep coming
+const BACK_AFTER: Duration = Duration::from_secs(2); // off screen this long, a text back on it is history again
 const READING_SLIP: usize = 2; // letters OCR may read differently from one frame to the next
 const SAME_PLACE_PX: i32 = 3; // a patch this close to the last one with the same text is the same patch
 const MIN_SELECTION: i32 = 8;
@@ -277,6 +279,7 @@ fn post_patches(overlay: usize, id: u64, patches: Vec<Patch>) {
 fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut translate::Translator, overlay: usize, shared: &Shared) {
     let post = |patches: Vec<Patch>| post_patches(overlay, job.id, patches);
     let mut idle_since = Instant::now();
+    let mut seen = HashMap::new(); // when each text was last on screen, for the history
     loop {
         let frame = loop {
             if !is_current(job.id) {
@@ -308,8 +311,12 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
             let mut shown = shared.shown.lock().unwrap();
             hold_still(&mut patches, &shown, &frame);
             let changed = patches != shown.1;
+            let new = newly_shown(&patches, &shown.1, &mut seen, Instant::now());
             *shown = (frame.pixels, patches.clone());
             drop(shown);
+            if translator.keeps_history() {
+                new.iter().for_each(|(source, text)| translate::remember(source, text));
+            }
             shared.done.store(true, Ordering::Relaxed);
             post(patches);
             if changed {
@@ -327,6 +334,20 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
         }
         idle_since = Instant::now();
     }
+}
+
+/// What has come on screen since the last look, in reading order, for the history: a line read
+/// again later, as when a game goes back to it, counts each time. A text off the screen only for
+/// a moment does not, as a menu item does while the mouse lights it up.
+fn newly_shown(patches: &[Patch], before: &[Patch], seen: &mut HashMap<String, Instant>, now: Instant) -> Vec<(String, String)> {
+    let shown = |p: &&Patch| !p.source.is_empty() && !p.text.is_empty();
+    let back = |p: &&Patch| !before.iter().any(|b| b.source == p.source) && seen.get(&p.source).is_none_or(|&t| now.duration_since(t) >= BACK_AFTER);
+    let new = patches.iter().filter(shown).filter(back).map(|p| (p.source.clone(), p.text.clone())).collect();
+    for p in patches.iter().filter(shown) {
+        seen.insert(p.source.clone(), now);
+    }
+    seen.retain(|_, &mut t| now.duration_since(t) < BACK_AFTER * 60);
+    new
 }
 
 /// Two readings of one line: all but a letter or two around a part they share.
@@ -2485,6 +2506,23 @@ mod tests {
         assert_eq!(cut("Save your work"), ["Save ", "your ", "work"]);
         assert_eq!(cut("SharePoint コンテンツ"), ["SharePoint ", "コンテンツ"]);
         assert_eq!(cut("ページ（project.microsoft.com）で確認、それから"), ["ページ", "（project.microsoft.com）で", "確認、", "それから"]);
+    }
+
+    #[test]
+    fn the_history_takes_a_line_again_when_it_comes_back() {
+        let line = |source: &str| Patch { text: format!("訳 {source}"), source: source.into(), ..Patch::status("", 100) };
+        let (mut seen, start) = (HashMap::new(), Instant::now());
+        let at = |s: u64| start + Duration::from_secs(s);
+        let (menu, a, b) = (line("Save"), line("Line A"), line("Line B"));
+        assert_eq!(newly_shown(&[menu.clone(), a.clone()], &[], &mut seen, at(0)).len(), 2);
+        // Still there: nothing new. The next line: new.
+        assert!(newly_shown(&[menu.clone(), a.clone()], &[menu.clone(), a.clone()], &mut seen, at(5)).is_empty());
+        assert_eq!(newly_shown(&[menu.clone(), b.clone()], &[menu.clone(), a.clone()], &mut seen, at(10)).len(), 1);
+        // The mouse over the menu item: off for a moment, back.
+        assert!(newly_shown(&[menu.clone(), b.clone()], &[b.clone()], &mut seen, at(11)).is_empty());
+        // The game goes back to line A: it is kept again.
+        let got = newly_shown(&[menu.clone(), a.clone()], &[menu.clone(), b.clone()], &mut seen, at(20));
+        assert_eq!(got, [("Line A".to_string(), "訳 Line A".to_string())]);
     }
 
     #[test]
