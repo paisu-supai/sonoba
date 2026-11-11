@@ -1509,8 +1509,9 @@ unsafe fn wrapped(hdc: HDC, text: &str, width: i32) -> Vec<u16> {
 /// Keeps the original font size if the text fits, spreading one line over empty background
 /// first, then narrowing the letters, and shrinking only after that: a translation as tall as
 /// the labels around it reads better than a small one. A one-line original stays on one line
-/// if narrowing can keep it there. Overhanging leading is empty, so it does not count, and the
-/// patch grows only when even MIN_TEXT_PX does not fit.
+/// if narrowing can keep it there; a paragraph grows down over empty background before it
+/// narrows. Overhanging leading is empty, so it does not count, and the patch grows otherwise
+/// only when even MIN_TEXT_PX does not fit.
 unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
     let measure = |px: i32, narrow: i32, width: i32| unsafe {
         let font = text_font(px, patch.bold, narrow);
@@ -1530,16 +1531,22 @@ unsafe fn fit(hdc: HDC, patch: &mut Patch, status_px: i32) {
         let room = patch.h + px / 2;
         // A label's glow can leave room for two lines; it narrows before it wraps.
         let line = if patch.one_line { measure(px, 100, 1 << 20).bottom.min(room) } else { room };
-        for limit in [line, room] {
-            for &narrow in narrows {
-                let normal = measure(px, narrow, patch.w);
-                if normal.bottom <= limit {
-                    break 'fit (normal, patch.w, narrow);
+        let grown = patch.max_h.max(patch.h) + px / 2;
+        let tries: Vec<(i32, i32)> = match patch.one_line {
+            true => [line, room].iter().flat_map(|&limit| narrows.iter().map(move |&narrow| (limit, narrow))).collect(),
+            false => narrows.iter().flat_map(|&narrow| [(room, narrow), (grown, narrow)]).collect(),
+        };
+        for (limit, narrow) in tries {
+            let normal = measure(px, narrow, patch.w);
+            if normal.bottom <= limit {
+                if limit > room {
+                    patch.h = patch.h.max(normal.bottom.min(patch.max_h)); // what it grew into is painted
                 }
-                let spread = measure(px, narrow, patch.max_w);
-                if spread.bottom <= limit {
-                    break 'fit (spread, patch.w.max(spread.right + 1), narrow);
-                }
+                break 'fit (normal, patch.w, narrow);
+            }
+            let spread = measure(px, narrow, patch.max_w);
+            if spread.bottom <= limit {
+                break 'fit (spread, patch.w.max(spread.right + 1), narrow);
             }
         }
         if status || px <= smallest {
@@ -2532,6 +2539,22 @@ mod tests {
         let outside: Vec<(i32, i32)> = (0..h as i32).flat_map(|y| (0..w as i32).map(move |x| (x, y))).filter(|&(x, y)| !inside(x, y) && drawn[y as usize * w + x as usize] & 0xFFFFFF != 0xFF00FF).collect();
         assert!(outside.is_empty(), "drawn outside the patch: {:?}", &outside[..outside.len().min(5)]);
         assert!((0..w * h).any(|i| drawn[i] & 0xFFFFFF == 0xFFFFFF), "the text was drawn");
+    }
+
+    /// A paragraph's translation, wrapped at words, takes a line more than the original.
+    #[test]
+    fn a_paragraph_grows_into_the_gap_below_before_it_narrows() {
+        let text = "ツール呼び出しにより、モデルは予測可能な形式で関数をリクエストできるようになります。構造化出力により、スキーマに従ったJSONを返すことが可能になります。";
+        let paragraph = |max_h| Patch { w: 300, h: 76, max_h, em: 17, text: text.into(), ..Patch::status("", 300) };
+        let (mut tight, mut roomy) = (paragraph(76), paragraph(200));
+        unsafe {
+            let mem = CreateCompatibleDC(null_mut());
+            fit(mem, &mut tight, STATUS_PX);
+            fit(mem, &mut roomy, STATUS_PX);
+            DeleteDC(mem);
+        }
+        assert!(tight.narrow < 100 || tight.px < 17, "the test needs a paragraph that does not fit: {tight:?}");
+        assert!(roomy.narrow == 100 && roomy.px == 17 && roomy.h > 76 && roomy.h <= 200, "{roomy:?}");
     }
 
     /// Draws the overlay onto a picture, to judge a layout without touching the real screen:
