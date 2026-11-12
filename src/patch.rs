@@ -116,6 +116,35 @@ impl Seen {
         let p = self.bgra.get((row * self.w + col) * 4..)?.get(..3).filter(|_| col < self.w)?;
         Some([p[0] as i32, p[1] as i32, p[2] as i32])
     }
+
+    /// The colour the letters have in `frame`, `fg` being theirs when read: a scene fading out
+    /// takes them down with it. Their pixels are those in their colour beside an edge that is
+    /// still there; a bright patch of the picture that passed for letters has gone with its edge.
+    fn ink_in(&self, frame: &[u8], width: usize, fg: [i32; 3]) -> [i32; 3] {
+        let height = frame.len() / 4 / width.max(1);
+        let sub = |a: [i32; 3], b: [i32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [i32; 3], b: [i32; 3]| (0..3).map(|c| a[c] * b[c]).sum::<i32>();
+        let mut shifts: Vec<[i32; 3]> = Vec::new();
+        for i in 0..self.bgra.len() / 4 {
+            let (x, y) = (self.x + i % self.w, self.y + i / self.w);
+            let Some(was) = self.pixel(x, y).filter(|&p| distance(p, fg) <= SAME_FG && y < height) else { continue };
+            for beside in [x.checked_sub(EDGE_PX), Some(x + EDGE_PX)].into_iter().flatten().filter(|&beside| x.max(beside) < width) {
+                let Some(then) = self.pixel(beside, y).map(|off| sub(was, off)) else { continue };
+                let now = sub(pixel(frame, width, x, y), pixel(frame, width, beside, y));
+                if distance(then, [0; 3]) > GLYPH_DISTANCE && dot(now, then) * 4 >= dot(then, then) {
+                    shifts.push(sub(pixel(frame, width, x, y), was));
+                    break;
+                }
+            }
+        }
+        if shifts.is_empty() {
+            return fg;
+        }
+        let middle = shifts.len() / 2;
+        let now = [0, 1, 2].map(|c| fg[c] + *shifts.iter().map(|s| s[c]).collect::<Vec<i32>>().select_nth_unstable(middle).1);
+        // Compression noise is no change of colour.
+        if distance(now, fg) <= SAME_BG { fg } else { now }
+    }
 }
 
 fn distance(a: [i32; 3], b: [i32; 3]) -> i32 {
@@ -583,7 +612,7 @@ impl Patch {
     pub fn keep_picture(mut self, bgra: &[u8], width: usize, height: usize) -> Self {
         let area = (self.x as usize, self.y as usize, self.w.max(self.max_w) as usize, self.h as usize);
         let fg = [(self.fg >> 16 & 0xFF) as i32, (self.fg >> 8 & 0xFF) as i32, (self.fg & 0xFF) as i32];
-        self.backdrop = Some(Arc::new(paint_out_letters(bgra, width, height, area, fg)));
+        self.backdrop = Some(Arc::new(paint_out_letters(bgra, width, height, area, self.seen.ink_in(bgra, width, fg))));
         self
     }
 
@@ -1091,6 +1120,48 @@ mod tests {
         assert!(distance(at(22, 30), pixel(&before, w, 22, 30)) < 30, "{:?}", at(22, 30));
         assert_eq!(at(32, 30), pixel(&before, w, 32, 30), "between the letters nothing changes");
         assert_eq!(at(280, 30), [0; 3], "the sleeve stays");
+    }
+
+    /// A scene fading out takes the letters down with it: they are no longer the colour they
+    /// were read in, and the copy painted again under the translation must lose them all the same.
+    #[test]
+    fn letters_that_fade_with_the_screen_still_come_off() {
+        let (w, h) = (300usize, 60usize);
+        let mut img = canvas(w, h, WHITE);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (40 + x / 4 + y) as u8;
+                img[(y * w + x) * 4..][..3].copy_from_slice(&[v, v + 10, v + 20]);
+            }
+        }
+        let before = img.clone();
+        for left in (20..270).step_by(16) {
+            paint(&mut img, w, (left, 20, left + 6, 40), WHITE, 1);
+        }
+        let read = Patch { x: 10, y: 16, w: 280, h: 28, fg: 0x00FFFFFF, ..Patch::status("", 280) }.seen_in(&img, w).keep_picture(&img, w, h);
+        let dim = |img: &[u8], percent: usize| -> Vec<u8> { img.iter().map(|&v| (v as usize * percent / 100) as u8).collect() };
+        for percent in [100, 95, 85, 50] {
+            let (now, clean) = (dim(&img, percent), dim(&before, percent));
+            let b = read.clone().keep_picture(&now, w, h).backdrop.unwrap();
+            for x in (22..270).step_by(16) {
+                let p = pixel(&b.bgra, 280, x - 10, 30 - 16);
+                assert!(distance(p, pixel(&clean, w, x, 30)) < 30, "at {percent}% a letter is left at {x}: {p:?}");
+            }
+        }
+    }
+
+    /// A lantern as bright as the letters goes when the scene behind them changes. The letters
+    /// have not changed colour for that, however much of what passed for them it was.
+    #[test]
+    fn a_bright_patch_of_the_picture_going_leaves_the_letters_their_colour() {
+        let mut first = canvas(100, 40, [70, 40, 30]);
+        paint(&mut first, 100, (10, 10, 50, 30), [240, 240, 240], 1);
+        paint(&mut first, 100, (60, 15, 90, 25), WHITE, 3);
+        let mut later = canvas(100, 40, [150, 120, 100]);
+        paint(&mut later, 100, (60, 15, 90, 25), WHITE, 3);
+        let seen = Seen::of(&first, 100, (5, 10, 90, 20));
+        assert_eq!(seen.ink_in(&first, 100, [255; 3]), [255; 3]);
+        assert_eq!(seen.ink_in(&later, 100, [255; 3]), [255; 3]);
     }
 
     #[test]
