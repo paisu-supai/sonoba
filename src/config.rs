@@ -44,6 +44,7 @@ pub struct Config {
     pub intro_done: bool, // the first-run guide was seen through
     pub license_accepted: bool, // nothing translates or downloads until the user agrees
     pub form: String, // "" follows the original's tone; "polite" or "plain" for Japanese
+    pub settle_ms: u64, // live text is translated once it has read the same for this long; 0 translates at once
     pub glossary: Vec<(String, String)>, // term, and the translation it must get
     pub font: String, // "" for the app's default
     pub bold_text: bool, // always, not only where the original is bold
@@ -77,6 +78,7 @@ impl Default for Config {
             intro_done: false,
             license_accepted: false,
             form: String::new(),
+            settle_ms: 0,
             glossary: Vec::new(),
             font: String::new(),
             bold_text: false,
@@ -120,6 +122,7 @@ impl Config {
         if let Some(form) = saved["form"].as_str().filter(|f| ["polite", "plain"].contains(f)) {
             config.form = form.to_string();
         }
+        config.settle_ms = saved["settle_ms"].as_u64().unwrap_or(0).min(5000);
         if let Some(terms) = saved["glossary"].as_array() {
             let pair = |t: &Value| Some((t[0].as_str()?.to_string(), t[1].as_str()?.to_string()));
             config.glossary = terms.iter().filter_map(pair).collect();
@@ -163,6 +166,7 @@ impl Config {
             "peek": hotkey(&self.hotkeys[3]),
             "copy": hotkey(&self.hotkeys[4]),
             "form": self.form,
+            "settle_ms": self.settle_ms,
             "glossary": self.glossary,
             "font": self.font,
             "bold_text": self.bold_text,
@@ -256,6 +260,7 @@ mod tests {
     #[test]
     fn settings_survive_a_round_trip() {
         let mut config = Config::default();
+        assert_eq!(config.settle_ms, 0);
         config.model = "custom.gguf".into();
         config.model_folder = "D:/models".into();
         config.device = Device::Cpu;
@@ -273,6 +278,7 @@ mod tests {
         config.hotkeys[4] = Hotkey { mods: 0, key: 5 };
         config.hotkeys[3] = Hotkey::OFF;
         config.form = "polite".into();
+        config.settle_ms = 1000;
         config.glossary = vec![("bank".into(), "川岸".into())];
         config.font = "Meiryo".into();
         config.bold_text = true;
@@ -290,5 +296,6 @@ mod tests {
     fn a_damaged_file_means_defaults() {
         assert_eq!(Config::parse("{ not json"), Config::default());
         assert_eq!(Config::parse("{\"device\": 7}"), Config::default());
+        assert_eq!(Config::parse("{\"settle_ms\": 99999}").settle_ms, 5000);
     }
 }

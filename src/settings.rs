@@ -186,6 +186,7 @@ fn state() -> Value {
         "ui_lang": config.ui_lang,
         "taken": *crate::TAKEN_KEYS.lock().unwrap(),
         "form": config.form,
+        "settle_ms": config.settle_ms,
         "glossary": config.glossary,
         "font": config.font,
         "fonts": fonts(),
@@ -352,6 +353,7 @@ fn on_message(text: &str) {
         }
         "autostart" => set_autostart(flag),
         "form" => config::update(|c| c.form = text_value),
+        "settle_ms" => config::update(|c| c.settle_ms = value.as_u64().unwrap_or(0).min(5000)),
         "glossary" => {
             let pair = |t: &Value| Some((t[0].as_str()?.trim().to_string(), t[1].as_str()?.trim().to_string()));
             let terms = value.as_array().map_or_else(Vec::new, |terms| terms.iter().filter_map(pair).collect());
