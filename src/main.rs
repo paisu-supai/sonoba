@@ -304,21 +304,12 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
             post(patches)
         };
         let result = translate_frame(&frame, job.live, models, translator, &keep_going, &post_now, shared);
-        let mut patches = result.unwrap_or_else(|e| vec![Patch::status(&format!("エラー: {e}"), frame.w as i32)]);
+        let patches = result.unwrap_or_else(|e| vec![Patch::status(&format!("エラー: {e}"), frame.w as i32)]);
         if keep_going() {
-            let pixels = catch_up(&frame.pixels, &mut patches, frame.w, shared).unwrap_or(frame.pixels);
-            let frame = Frame { pixels, w: frame.w, h: frame.h };
-            let mut shown = shared.shown.lock().unwrap();
-            hold_still(&mut patches, &shown, &frame);
-            let changed = patches != shown.1;
-            let new = newly_shown(&patches, &shown.1, &mut seen, Instant::now());
-            *shown = (frame.pixels, patches.clone());
-            drop(shown);
+            let (changed, new) = put_up(patches, frame, shared, &mut seen, &post);
             if translator.keeps_history() {
                 new.iter().for_each(|(source, text)| translate::remember(source, text));
             }
-            shared.done.store(true, Ordering::Relaxed);
-            post(patches);
             if changed {
                 unsafe { PostMessageW(overlay as HWND, WM_TRANSLATED, job.id as usize, 0) };
             }
@@ -334,6 +325,20 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
         }
         idle_since = Instant::now();
     }
+}
+
+fn put_up(mut patches: Vec<Patch>, frame: Frame, shared: &Shared, seen: &mut HashMap<String, Instant>, post: &impl Fn(Vec<Patch>)) -> (bool, Vec<(String, String)>) {
+    // The watcher must not repaint between the newest picture and the patches posted from it.
+    let mut shown = shared.shown.lock().unwrap();
+    let pixels = catch_up(&frame.pixels, &mut patches, frame.w, shared).unwrap_or(frame.pixels);
+    let frame = Frame { pixels, w: frame.w, h: frame.h };
+    hold_still(&mut patches, &shown, &frame);
+    let changed = patches != shown.1;
+    let new = newly_shown(&patches, &shown.1, seen, Instant::now());
+    *shown = (frame.pixels, patches.clone());
+    shared.done.store(true, Ordering::Relaxed);
+    post(patches);
+    (changed, new)
 }
 
 /// What has come on screen since the last look, in reading order, for the history: a line read
@@ -517,13 +522,15 @@ fn watch(job: Job, overlay: usize, shared: &Shared) {
             if frame != last {
                 let first = last.is_empty();
                 if job.live || first {
+                    // Known before the patches on show are brought up to it: a translation
+                    // finishing just now would otherwise put them back on the picture before.
+                    last.clear();
+                    last.extend_from_slice(frame);
+                    shared.latest.lock().unwrap().clone_from(&last);
                     if job.live {
                         drop_stale_patches(frame, w as usize, shared, &post);
                         give_up_on_stale_work(frame, w as usize, shared);
                     }
-                    last.clear();
-                    last.extend_from_slice(frame);
-                    shared.latest.lock().unwrap().clone_from(&last);
                     *shared.frame.lock().unwrap() = Some(Frame { pixels: last.clone(), w: w as usize, h: h as usize });
                     shared.fresh.notify_one();
                 } else if changed_pixels(frame, &last) * 100 > last.len() / 4 * STALE_PERCENT {
@@ -2457,6 +2464,45 @@ mod tests {
 
     fn shown_patch(source: &str, text: &str) -> Patch {
         Patch { x: 0, y: 0, w: 100, h: 20, text: text.to_string(), source: source.to_string(), ..Patch::status("", 100) }
+    }
+
+    #[test]
+    fn a_late_translation_keeps_the_watchers_fresh_backdrop() {
+        let (w, h) = (100usize, 40usize);
+        let picture = |color: [u8; 3]| {
+            let mut pixels: Vec<u8> = (0..w * h).flat_map(|_| [color[0], color[1], color[2], 0]).collect();
+            for y in 15..25 {
+                for x in (20..60).step_by(3) {
+                    pixels[(y * w + x) * 4..][..3].copy_from_slice(&[255; 3]);
+                }
+            }
+            pixels
+        };
+        let (old, new) = (picture([90, 60, 120]), picture([120, 70, 150]));
+        let fresh = Patch { x: 10, y: 10, w: 60, h: 20, source: "guardian".into(), text: "守護者".into(), ..Patch::status("", 60) }.seen_in(&old, w);
+        let painted = fresh.clone().keep_picture(&old, w, h);
+        assert!(painted.backdrop_behind(&new, w));
+        let shared = new_shared();
+        *shared.shown.lock().unwrap() = (old.clone(), vec![painted]);
+        *shared.latest.lock().unwrap() = old.clone();
+        let frame = Frame { pixels: old, w, h };
+        let posted = Mutex::new(Vec::new());
+        let mut shown = shared.shown.lock().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                put_up(vec![fresh], frame, &shared, &mut HashMap::new(), &|patches| *posted.lock().unwrap() = patches);
+            });
+            // The worker waits while the watcher repaints the picture behind the same text.
+            std::thread::sleep(Duration::from_millis(100));
+            *shared.latest.lock().unwrap() = new.clone();
+            shown.1[0] = shown.1[0].clone().keep_picture(&new, w, h);
+            shown.0 = new.clone();
+            drop(shown);
+        });
+        let shown = shared.shown.lock().unwrap();
+        assert_eq!(shown.1.len(), 1);
+        assert!(!shown.1[0].backdrop_behind(&new, w));
+        assert_eq!(*posted.lock().unwrap(), shown.1);
     }
 
     #[test]
