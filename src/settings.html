@@ -118,10 +118,12 @@ dialog .actions { padding: 8px 0 0; justify-content: flex-end; }
 .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin-bottom: 14px; }
 .terms { padding: 4px 16px 12px; }
 .term { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 8px; align-items: center; margin-bottom: 6px; }
-input[type=text], input[type=search] {
+input[type=text], input[type=search], input[type=number] {
   font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; width: 100%; min-width: 0;
 }
-input[type=text]:focus-visible, input[type=search]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type=text]:focus-visible, input[type=search]:focus-visible, input[type=number]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type=number] { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
+.number { display: flex; align-items: center; gap: 6px; flex: none; }
 .x { all: unset; cursor: pointer; color: var(--soft); padding: 2px 8px; border-radius: 6px; }
 .x:hover { color: var(--danger); }
 .past { padding: 10px 16px; cursor: pointer; user-select: text; }
@@ -165,7 +167,7 @@ kbd { font: inherit; font-size: 12.5px; padding: 2px 8px; border: 1px solid var(
       <div class="row"><div><b data-t="source"></b><small data-t="source_note"></small></div><select id="source"></select></div>
       <div class="row"><div><b data-t="target"></b></div><select id="target"></select></div>
       <div class="row" id="form_row"><div><b data-t="form"></b><small data-t="form_note"></small></div><select id="form"></select></div>
-      <div class="row"><div><b data-t="settle"></b><small data-t="settle_note"></small></div><select id="settle"></select></div>
+      <div class="row"><div><b id="settle_label" data-t="settle"></b><small data-t="settle_note"></small></div><span class="number"><input type="number" id="settle" min="0" max="5" step="0.1" inputmode="decimal" aria-labelledby="settle_label"><span data-t="settle_unit"></span></span></div>
     </div>
     <p class="hint" data-t="easy_note"></p>
     <div class="card">
@@ -356,8 +358,8 @@ const TEXT = {
     key_taken: '別のアプリが使っています。別のキーにしてください', key_peek: '押している間だけ原文を見る', key_peek_note: '離すと訳文に戻ります', key_copy: '訳文をコピー',
     mouse_mid: 'マウス中ボタン', mouse_back: 'マウス戻るボタン', mouse_next: 'マウス進むボタン',
     form: '文体', form_note: '翻訳先が日本語で、モデルが PLaMo のときに使います', form_auto: 'おまかせ（原文に合わせる）', form_polite: 'です・ます調', form_plain: 'だ・である調',
-    settle: '訳す前に待つ時間', settle_note: 'リアルタイム翻訳で、読み取った文字がこの時間変わらなければ訳します。1 文字ずつ出るセリフで、訳文が何度も入れ替わるのを防ぎます',
-    settle_0: '待たない', settle_500: '0.5 秒', settle_1000: '1 秒', settle_2000: '2 秒',
+    settle: '訳す前に待つ時間', settle_note: 'リアルタイム翻訳で、読み取った文字がこの時間変わらなければ訳します。1\u00a0文字ずつ出るセリフで、訳文が何度も入れ替わるのを防ぎます。0\u00a0にすると待たずに訳します',
+    settle_unit: '秒',
     glossary: '用語集', glossary_note: '決まった訳にしたい言葉を登録します。原文にその言葉があるときだけ使います', term_add: '追加', term_from: '原文の言葉', term_to: '訳語',
     font: '訳文のフォント', font_default: '標準（Yu Gothic UI）', bold_text: '訳文を太字にする', bold_note: 'オフのときは元の文字に合わせます', opacity: '訳文の濃さ', opacity_note: '下げると元の画面が透けて見えます',
     nav_history: '履歴', keep_history: '履歴を残す', keep_note: 'アプリを終了すると消えます。ファイルには保存しません', clear: 'すべて消す', find: '履歴を検索', history_empty: 'まだ履歴はありません', history_note: 'クリックすると訳文をコピーします。', copied: 'コピーしました',
@@ -409,8 +411,8 @@ const TEXT = {
     key_taken: 'Another app holds this key. Choose another', key_peek: 'Show the original while held', key_peek_note: 'The translation returns on release', key_copy: 'Copy the translation',
     mouse_mid: 'Middle mouse button', mouse_back: 'Mouse back button', mouse_next: 'Mouse forward button',
     form: 'Style', form_note: 'For Japanese output with a PLaMo model', form_auto: 'Automatic (follows the original)', form_polite: 'Polite (desu/masu)', form_plain: 'Plain (da/dearu)',
-    settle: 'Wait before translating', settle_note: 'In live translation, text is translated once it has read the same for this long. Keeps dialogue that appears a letter at a time from being translated over and over',
-    settle_0: "Don't wait", settle_500: '0.5 s', settle_1000: '1 s', settle_2000: '2 s',
+    settle: 'Wait before translating', settle_note: 'In live translation, text is translated once it has read the same for this long. Keeps dialogue that appears a letter at a time from being translated over and over. 0 translates at once',
+    settle_unit: 's',
     glossary: 'Glossary', glossary_note: 'Words that must get a fixed translation. Used only when the original contains them', term_add: 'Add', term_from: 'Word in the original', term_to: 'Translation',
     font: 'Translation font', font_default: 'Default (Yu Gothic UI)', bold_text: 'Always bold', bold_note: 'Off follows the original text', opacity: 'Strength', opacity_note: 'Lower lets the screen show through',
     nav_history: 'History', keep_history: 'Keep a history', keep_note: 'Gone when the app exits. Nothing is saved to a file', clear: 'Clear all', find: 'Search the history', history_empty: 'Nothing here yet', history_note: 'Click an entry to copy its translation.', copied: 'Copied',
@@ -583,7 +585,7 @@ function render(s) {
   options($('form'), [['', T('form_auto')], ['polite', T('form_polite')], ['plain', T('form_plain')]], s.form);
   $('form_row').hidden = s.target !== 'ja';
   $('form_row').style.display = s.target === 'ja' ? '' : 'none';
-  options($('settle'), [0, 500, 1000, 2000].map(v => [v, T('settle_' + v)]), s.settle_ms);
+  if (document.activeElement !== $('settle')) $('settle').value = s.settle_ms / 1000;
   options($('font'), [['', T('font_default')], ...s.fonts.map(f => [f, f])], s.font);
   options($('opacity'), [100, 90, 80, 70, 60, 50].map(v => [v, v + '%']), s.opacity);
   renderTerms(s);
@@ -716,7 +718,13 @@ $('term_add').onclick = () => { terms.push(['', '']); renderTerms(state); $('ter
 $('history_find').oninput = renderHistory;
 $('history_clear').onclick = () => { send('history_clear'); past = []; renderHistory(); };
 $('opacity').onchange = e => { e.target.dataset.sent = e.target.value; send('opacity', +e.target.value); };
-$('settle').onchange = e => { e.target.dataset.sent = e.target.value; send('settle_ms', +e.target.value); };
+$('settle').onchange = e => {
+  const seconds = e.target.valueAsNumber;
+  if (!Number.isFinite(seconds)) { e.target.value = state.settle_ms / 1000; return; }
+  const ms = Math.round(Math.max(0, Math.min(5, seconds)) * 10) * 100;
+  e.target.value = ms / 1000;
+  send('settle_ms', ms);
+};
 for (const id of ['source', 'target', 'device', 'form', 'font']) $(id).onchange = e => { e.target.dataset.sent = e.target.value; send(id, e.target.value); };
 $('models').onchange = e => { e.target.dataset.sent = e.target.value; send('model', e.target.value); };
 $('folder_pick').onclick = () => send('model_folder_pick');
