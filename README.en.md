@@ -67,6 +67,7 @@ Double-click the system tray icon to open Settings. The Settings screen is displ
 
 - Source and target: Same settings as the bar used to select the region
 - Style: Automatic, polite, plain. Auto matches the tone of the original. Only with PLaMo 3 Translate.
+- Wait before translating: In live translation, text is translated once it has read the same for this long. 0 to 5 seconds; 0 does not wait. Keeps dialogue that appears a letter at a time from being translated over and over
 - Glossary: A list of words for which you want a fixed translation. It is used only when the word appears in the original text.
 - Languages to read: Korean comes installed. Russian, Arabic, Thai, Hindi, Tamil and Telugu become readable once chosen and downloaded. Each can be deleted
 - Translation model: Select, download, delete, load, unload, change the folder
