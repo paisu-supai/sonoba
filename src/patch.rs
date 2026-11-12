@@ -18,6 +18,7 @@ const GLOW_PX: usize = 4; // how far a glow or outline reaches from small letter
 const GLOW_PER_HEIGHT: usize = 8; // and from big ones: an eighth of the patch's height
 const SMOOTHING: usize = 4; // passes over a painted-out letter, so that no outline of it shows
 const SAME_BG: i32 = 30;
+const FLAT_BG: i32 = 8; // a drawn fill is one colour to the pixel, while a scene or a see-through box only comes near
 const SAME_FG: i32 = 80; // thin text rarely reaches its true colour, so allow for that
 const OWN_FG: i32 = 30; // somewhere in a letter, though, a pixel comes this close to it
 const BOLD_STEM: usize = 8; // a stem wider than 1/8 of the line height, less one antialiased pixel
@@ -186,12 +187,21 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     let mut bg = [(b / n) as i32, (g / n) as i32, (r / n) as i32];
     // A picture has no common colour, so the letters of a thick subtitle can come first. The
     // box reaches past the text, so its two ends are the background then. Bold letters packed
-    // tight can outnumber a flat background too, but then the box's whole edge, ends, top and
-    // bottom, is that colour; a patch of one colour in a picture rarely runs all round.
+    // tight can outnumber a flat background too. One side can catch a border or a neighbouring
+    // line, but a see-through box over a scene varies on more than one side.
     let ends: Vec<usize> = (x0..x1).take(EDGE_COLUMNS).chain((x0..x1).rev().take(EDGE_COLUMNS)).collect();
     let around: Vec<[i32; 3]> = middle.clone().flat_map(|row| ends.iter().map(move |&col| (col, row))).map(|(col, row)| pixel(bgra, width, col, row)).collect();
-    let edge: Vec<[i32; 3]> = (x0..x1).flat_map(|col| [(col, y0), (col, y1 - 1)]).map(|(col, row)| pixel(bgra, width, col, row)).chain(around.iter().copied()).collect();
-    let flat_edge = edge.iter().filter(|&&p| distance(p, bg) <= SAME_BG).count() * 10 >= edge.len() * 9; // a see-through box over a scene varies more
+    let sides = [
+        (x0, x1, y0, y0 + 1),
+        (x0, x1, y1 - 1, y1),
+        (x0, (x0 + EDGE_COLUMNS).min(x1), middle.start, middle.end),
+        (x1.saturating_sub(EDGE_COLUMNS).max(x0), x1, middle.start, middle.end),
+    ].map(|(left, right, top, bottom)| {
+        let same = |limit| (top..bottom).map(|row| (left..right).filter(|&col| distance(pixel(bgra, width, col, row), bg) <= limit).count()).sum::<usize>();
+        (same(SAME_BG), same(FLAT_BG), (right - left) * (bottom - top))
+    });
+    let flat_edge = sides.iter().map(|s| s.0).sum::<usize>() * 10 >= sides.iter().map(|s| s.2).sum::<usize>() * 9
+        || sides.iter().filter(|&&(_, flat, total)| flat * 10 >= total * 9).count() >= 3;
     let picture = n * 2 < (middle.len() * (x1 - x0)) as u64 && !flat_edge;
     if picture {
         bg = [0, 1, 2].map(|c| around.iter().map(|p| p[c]).sum::<i32>() / around.len().max(1) as i32);
@@ -367,7 +377,8 @@ pub fn glyphs(bgra: &[u8], width: usize, height: usize, (x, y, w, h): (i32, i32,
     // Over a picture the background's own pixels pass for ink, and a tight box can cut a glow
     // off so that little of it is left: there the letters' own colour gives the measure.
     let glow = letters > 0 && (letters * 8 < h * 7 || picture && letters < h);
-    if glow {
+    // On a flat fill, two rows of fringe can be antialiasing, whose edges belong to the stems.
+    if glow && (picture || h - letters > 2) {
         runs = [0; 32];
         for row in top..bottom {
             let mut run = 0;
@@ -822,6 +833,49 @@ mod tests {
         let g = glyphs(&img, 120, 40, (0, 0, 120, 40), Some("word")).unwrap();
         assert_eq!(g.bg, [220, 110, 30]);
         assert_eq!((g.y, g.h), (16, 8));
+    }
+
+    #[test]
+    fn a_flat_fill_can_meet_another_colour_on_one_side() {
+        for (top, bottom, textured, picture) in [(true, false, false, false), (false, true, false, false), (true, true, false, true), (true, false, true, true)] {
+            let mut img = canvas(80, 28, [247, 235, 222]);
+            if textured {
+                // One column in eight differs by 24, so the fill stays the commonest colour.
+                paint(&mut img, 80, (0, 0, 80, 28), [239, 227, 214], 8);
+            }
+            // The fill is the commonest colour but covers less than half of the middle.
+            for x in (4..76).step_by(6) {
+                paint(&mut img, 80, (x, 7, x + 4, 21), [124, 118, 111], 1);
+                paint(&mut img, 80, (x + 1, 8, x + 3, 20), BLACK, 1);
+            }
+            if top {
+                paint(&mut img, 80, (0, 0, 80, 1), [180, 110, 60], 1);
+            }
+            if bottom {
+                paint(&mut img, 80, (0, 24, 80, 25), [180, 110, 60], 1);
+                paint(&mut img, 80, (0, 25, 80, 28), WHITE, 1);
+            }
+            let g = glyphs(&img, 80, 28, (0, 0, 80, 28), None).unwrap();
+            assert_eq!(g.picture, picture, "{g:?}");
+            if !picture {
+                assert_eq!((g.y, g.h, g.letters), (7, 14, 12));
+            }
+        }
+    }
+
+    #[test]
+    fn antialiased_stems_keep_their_weight_on_a_flat_fill() {
+        for stem in [1, 2] {
+            let mut img = canvas(80, 28, WHITE);
+            for x in (8..72).step_by(10) {
+                paint(&mut img, 80, (x, 7, x + stem + 2, 21), [128; 3], 1);
+                paint(&mut img, 80, (x + 1, 8, x + stem + 1, 20), BLACK, 1);
+            }
+            let g = glyphs(&img, 80, 28, (0, 0, 80, 28), None).unwrap();
+            assert!(!g.picture);
+            assert_eq!((g.h, g.letters, g.stem), (14, 12, stem + 2));
+            assert_eq!(g.bold(), stem == 2);
+        }
     }
 
     #[test]

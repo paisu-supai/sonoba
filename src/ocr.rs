@@ -455,9 +455,9 @@ fn same_row(a: &Glyphs, b: &Glyphs) -> bool {
 /// text uses: "same" fills only the x-height, "Sign" also reaches up and down.
 fn font_size(ink_h: i32, text: &str) -> f32 {
     let has = |set: &str| text.chars().any(|c| set.contains(c) || !c.is_ascii());
-    let tall = has("bdfhiklt!?'\"()") || text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
+    let tall = has("bdfhiklt!?'\"()/") || text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
     // A comma dips below the line about half as far as a g does.
-    let deep = if has("gjpqyQ()") { 0.21 } else if has(",;") { 0.12 } else { 0.0 };
+    let deep = if has("gjpqyQ()/") { 0.21 } else if has(",;") { 0.12 } else { 0.0 };
     ink_h as f32 / (if tall { 0.72 } else { 0.52 } + deep)
 }
 
@@ -777,6 +777,9 @@ mod tests {
         assert_eq!(font_size(14, "Sign in").round(), 15.0);
         assert_eq!(font_size(11, "HELLO").round(), 15.0);
         assert_eq!(font_size(8, "same").round(), 15.0);
+        assert_eq!(font_size(14, "Radiology Application Server (RAS)").round(), 15.0);
+        assert_eq!(font_size(13, "WCF/SOAP Services").round(), 14.0);
+        assert_eq!(font_size(13, "a/a").round(), 14.0);
         // A game's 23 px dialogue: lines without a g or y, and a short last line.
         assert_eq!(font_size(19, "No need to look for me, Taka-kun.").round(), 23.0);
         assert_eq!(font_size(19, "What am I, then?").round(), 23.0);
