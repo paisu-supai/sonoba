@@ -49,6 +49,7 @@ const PARTIAL_EVERY: Duration = Duration::from_millis(30); // repaints while a p
 const MOVE_SETTLE: Duration = Duration::from_millis(120); // no frames are judged until a drag pauses
 const STALE_PERCENT: usize = 8; // of the pixels: a scrolled page, not a hover highlight or a caret
 const SETTLE: Duration = Duration::from_millis(300);
+const SETTLE_GAP: Duration = Duration::from_secs(1); // a line typed out again later reads as new
 const OCR_IDLE: Duration = Duration::from_secs(60); // free the OCR models this long after the last job
 const ENGINE_IDLE: Duration = Duration::from_secs(15 * 60); // and the model after this long
 const MAX_REST: Duration = Duration::from_millis(500); // the longest pause between frames that keep coming
@@ -173,10 +174,26 @@ fn is_current(id: u64) -> bool {
 // --- Worker: a watcher notices what changes on screen, however busy OCR is, and hands the newest
 // frame over to the worker. So work never piles up, and stale text goes as soon as it is stale.
 
+#[derive(Clone)]
 struct Frame {
     pixels: Vec<u8>,
     w: usize,
     h: usize,
+}
+
+/// Live, text typed out a letter at a time stays untranslated until it has read the same for a while.
+#[derive(Default)]
+struct Settle {
+    seen: HashMap<String, (Instant, Instant)>, // first and last read
+}
+
+impl Settle {
+    fn left(&mut self, text: &str, wait: Duration, now: Instant) -> Duration {
+        self.seen.retain(|_, &mut (_, last)| now.duration_since(last) <= wait + SETTLE_GAP);
+        let (first, last) = self.seen.entry(text.to_string()).or_insert((now, now));
+        *last = now;
+        wait.saturating_sub(now.duration_since(*first))
+    }
 }
 
 struct Shared {
@@ -280,14 +297,21 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
     let post = |patches: Vec<Patch>| post_patches(overlay, job.id, patches);
     let mut idle_since = Instant::now();
     let mut seen = HashMap::new(); // when each text was last on screen, for the history
+    let mut settle = Settle::default();
+    let mut retry: Option<(Frame, Instant)> = None;
     loop {
         let frame = loop {
             if !is_current(job.id) {
                 return;
             }
-            let (mut pending, _) = shared.fresh.wait_timeout_while(shared.frame.lock().unwrap(), POLL * 3, |frame| frame.is_none()).unwrap();
+            let wait = retry.as_ref().map_or(POLL * 3, |(_, at)| (POLL * 3).min(at.saturating_duration_since(Instant::now())));
+            let (mut pending, _) = shared.fresh.wait_timeout_while(shared.frame.lock().unwrap(), wait, |frame| frame.is_none()).unwrap();
             if let Some(frame) = pending.take() {
+                retry = None;
                 break frame;
+            }
+            if retry.as_ref().is_some_and(|(_, at)| Instant::now() >= *at) {
+                break retry.take().unwrap().0;
             }
             drop(pending); // a load takes a while, and the watcher needs this
             serve_requests(models, translator, &|| is_current(job.id));
@@ -303,9 +327,11 @@ fn translate_frames(job: Job, models: &mut Option<ocr::Ocr>, translator: &mut tr
             catch_up(&frame.pixels, &mut patches, frame.w, shared);
             post(patches)
         };
-        let result = translate_frame(&frame, job.live, models, translator, &keep_going, &post_now, shared);
-        let patches = result.unwrap_or_else(|e| vec![Patch::status(&format!("エラー: {e}"), frame.w as i32)]);
+        let result = translate_frame(&frame, job.live, models, translator, &mut settle, &keep_going, &post_now, shared);
+        let (patches, retry_at) = result.unwrap_or_else(|e| (vec![Patch::status(&format!("エラー: {e}"), frame.w as i32)], None));
         if keep_going() {
+            // A still screen sends no new frame, so held text gets another look when its wait ends.
+            retry = retry_at.map(|at| (frame.clone(), at));
             let (changed, new) = put_up(patches, frame, shared, &mut seen, &post);
             if translator.keeps_history() {
                 new.iter().for_each(|(source, text)| translate::remember(source, text));
@@ -706,15 +732,23 @@ fn crop(frame: &[u8], w: usize, (left, top, right, bottom): (usize, usize, usize
     (top..bottom).flat_map(|row| &frame[(row * w + left) * 4..(row * w + right) * 4]).copied().collect()
 }
 
+/// Waiting for a reading to settle must not take off a translation whose original text is still there.
+fn waiting_keeps(shown: &[Patch], held: &[&Patch], settled: &[&Patch], frame: &[u8], width: usize) -> Vec<Patch> {
+    shown.iter().filter(|p| {
+        !p.source.is_empty() && held.iter().any(|b| p.overlaps(b)) && !settled.iter().any(|b| p.overlaps(b)) && !p.is_gone(frame, width)
+    }).cloned().collect()
+}
+
 fn translate_frame(
     frame: &Frame,
     live: bool,
     models: &mut Option<ocr::Ocr>,
     translator: &mut translate::Translator,
+    settle: &mut Settle,
     keep_going: &(impl Fn() -> bool + Sync),
     post: &(impl Fn(Vec<Patch>) + Sync),
     shared: &Shared,
-) -> Result<Vec<Patch>, String> {
+) -> Result<(Vec<Patch>, Option<Instant>), String> {
     ensure_ocr(models)?;
     translator.follow_languages();
     let Frame { pixels, w, h } = frame;
@@ -723,8 +757,8 @@ fn translate_frame(
     let lines = read_lines(models.as_ref().unwrap(), frame, w, h, shared)?;
     let blocks = ocr::paragraphs(&lines);
     let blocks: Vec<&ocr::Block> = blocks.iter().filter(|b| !ocr::looks_like_code(&b.text)).collect();
-    let everything = blocks.iter().map(|block| Patch::new(frame, w, h, block, String::new())).collect();
-    *shared.working.lock().unwrap() = (frame.to_vec(), everything);
+    let everything: Vec<Patch> = blocks.iter().map(|block| Patch::new(frame, w, h, block, String::new())).collect();
+    *shared.working.lock().unwrap() = (frame.to_vec(), everything.clone());
     // Numbers, code and the like come back unchanged: leave the original on show.
     // Over a picture the letters are painted out of a copy of it. Live, the copy is painted again
     // whenever the picture behind it moves on (`hold_still`, `drop_stale_patches`).
@@ -737,13 +771,27 @@ fn translate_frame(
     // Whatever is known already goes up with the first new line, so nothing flickers.
     let mut slots: Vec<Option<Patch>> = vec![None; blocks.len()];
     let mut pending: Vec<&str> = Vec::new();
-    for (slot, block) in slots.iter_mut().zip(&blocks) {
+    let wait = Duration::from_millis(if live { config::get().settle_ms } else { 0 });
+    let now = Instant::now();
+    let mut retry_at: Option<Instant> = None;
+    let (mut held, mut settled) = (Vec::new(), Vec::new());
+    for ((slot, block), area) in slots.iter_mut().zip(&blocks).zip(&everything) {
         match translator.known(&block.text) {
             Some(text) => *slot = patch(block, &text),
-            None if !pending.contains(&block.text.as_str()) => pending.push(&block.text),
-            None => {}
+            None => {
+                let left = if wait.is_zero() { Duration::ZERO } else { settle.left(&block.text, wait, now) };
+                if !left.is_zero() {
+                    held.push(area);
+                    retry_at = Some(retry_at.map_or(now + left, |at| at.min(now + left)));
+                    continue;
+                } else if !pending.contains(&block.text.as_str()) {
+                    pending.push(&block.text);
+                }
+            }
         }
+        settled.push(area);
     }
+    let kept = if held.is_empty() { Vec::new() } else { waiting_keeps(&shared.shown.lock().unwrap().1, &held, &settled, frame, w) };
     let shared = Mutex::new((slots, Instant::now()));
     let result = translator.translate_all(&pending, keep_going, &|source, translation| {
         let (slots, last_post) = &mut *shared.lock().unwrap();
@@ -754,17 +802,17 @@ fn translate_frame(
         }
         if last_post.elapsed() > PARTIAL_EVERY {
             *last_post = Instant::now();
-            post(slots.iter().flatten().cloned().collect());
+            post(slots.iter().flatten().chain(&kept).cloned().collect());
         }
     });
-    let mut out: Vec<Patch> = shared.into_inner().unwrap().0.into_iter().flatten().collect();
+    let mut out: Vec<Patch> = shared.into_inner().unwrap().0.into_iter().flatten().chain(kept).collect();
     // What did finish stays on show: one failed reply is no reason to lose the page.
     if let Err(e) = result {
         out.push(Patch::status(&format!("{}{}", t("エラー: "), t(&e)), w as i32));
     } else if out.is_empty() && !live {
         out.push(Patch::status(&t(NOT_FOUND), w as i32));
     }
-    Ok(out)
+    Ok((out, retry_at))
 }
 
 // --- UI thread state. Cells only: window procedures re-enter while Win32 calls run.
@@ -2358,6 +2406,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settle_waits_for_the_full_line() {
+        let (mut settle, mut retry) = (Settle::default(), Settle::default());
+        let (start, wait) = (Instant::now(), Duration::from_secs(1));
+        for (i, text) in ["H", "He", "Hel", "Hell", "Hello"].into_iter().enumerate() {
+            let now = start + Duration::from_millis(i as u64 * 200);
+            assert_eq!(settle.left(text, wait, now), wait);
+            assert_eq!(retry.left(text, wait, now), wait);
+        }
+        let full = start + Duration::from_millis(800);
+        for ms in [200, 400, 600, 800, 1000] {
+            let elapsed = Duration::from_millis(ms);
+            assert_eq!(settle.left("Hello", wait, full + elapsed), wait.saturating_sub(elapsed));
+        }
+        assert_eq!(retry.left("Hello", wait, full + Duration::from_millis(1100)), Duration::ZERO);
+    }
+
+    #[test]
+    fn settle_keeps_a_text_through_a_misreading() {
+        let mut settle = Settle::default();
+        let (start, wait) = (Instant::now(), Duration::from_secs(1));
+        assert_eq!(settle.left("guardian", wait, start), wait);
+        assert_eq!(settle.left("quardian", wait, start + Duration::from_millis(300)), wait);
+        assert_eq!(settle.left("guardian", wait, start + wait), Duration::ZERO);
+    }
+
+    #[test]
+    fn settle_starts_over_after_a_gap_and_drops_unread_text() {
+        let mut settle = Settle::default();
+        let (start, wait) = (Instant::now(), Duration::from_secs(1));
+        let gap = wait + SETTLE_GAP;
+        assert_eq!(settle.left("Hello", wait, start), wait);
+        assert_eq!(settle.left("Hello", wait, start + gap), Duration::ZERO);
+        let later = start + gap * 2 + Duration::from_millis(1);
+        assert_eq!(settle.left("Hello", wait, later), wait);
+        assert_eq!(settle.left("Goodbye", wait, later + gap + Duration::from_millis(1)), wait);
+        assert_eq!(settle.seen.len(), 1);
+        assert!(!settle.seen.contains_key("Hello"));
+    }
+
+    #[test]
+    fn settle_zero_wait_is_immediate() {
+        let mut settle = Settle::default();
+        let start = Instant::now();
+        for (i, text) in ["H", "He", "Hello", "Hello"].into_iter().enumerate() {
+            assert_eq!(settle.left(text, Duration::ZERO, start + Duration::from_secs(i as u64)), Duration::ZERO);
+        }
+    }
+
+    #[test]
     fn only_regions_whose_picture_changed_are_read_again() {
         use std::cell::Cell;
         // Two regions side by side in a picture 4 wide and 1 high; the stand-in OCR reads one line each.
@@ -2464,6 +2561,31 @@ mod tests {
 
     fn shown_patch(source: &str, text: &str) -> Patch {
         Patch { x: 0, y: 0, w: 100, h: 20, text: text.to_string(), source: source.to_string(), ..Patch::status("", 100) }
+    }
+
+    #[test]
+    fn settle_keeps_only_present_translations_waiting_in_place() {
+        let columns: Vec<usize> = (10..90).step_by(6).collect();
+        let frame = page(&columns);
+        let shown = vec![shown_patch("guardian", "守護者").seen_in(&frame, 100)];
+        let held = Patch { x: 2, w: 98, ..shown_patch("quardian", "") };
+        assert!(!shown[0].is_gone(&frame, 100));
+        assert_eq!(waiting_keeps(&shown, &[&held], &[], &frame, 100), shown);
+
+        let moved = page(&columns[..columns.len() - 1]);
+        assert!(shown[0].text_changed(&moved, 100) > WOBBLE_PERCENT);
+        assert!(!shown[0].is_gone(&moved, 100));
+        assert_eq!(waiting_keeps(&shown, &[&held], &[], &moved, 100), shown);
+
+        let replaced = page(&[]);
+        assert!(shown[0].is_gone(&replaced, 100));
+        assert!(waiting_keeps(&shown, &[&held], &[], &replaced, 100).is_empty());
+        let settled = shown_patch("guardian", "");
+        assert!(waiting_keeps(&shown, &[&held], &[&settled], &frame, 100).is_empty());
+        let elsewhere = Patch { y: 20, ..held.clone() };
+        assert!(waiting_keeps(&shown, &[&elsewhere], &[], &frame, 100).is_empty());
+        let status = Patch { source: String::new(), ..shown[0].clone() };
+        assert!(waiting_keeps(&[status], &[&held], &[], &frame, 100).is_empty());
     }
 
     #[test]
@@ -2667,7 +2789,7 @@ mod tests {
             let shared = new_shared();
             *shared.latest.lock().unwrap() = bgra.clone(); // a still screen: nothing has moved since
             let start = Instant::now();
-            let mut patches = translate_frame(&frame, live, &mut models, &mut translator, &keep_going, &|_| {}, &shared).unwrap();
+            let (mut patches, _) = translate_frame(&frame, live, &mut models, &mut translator, &mut Settle::default(), &keep_going, &|_| {}, &shared).unwrap();
             println!("first pass {:?}", start.elapsed());
             unsafe {
                 let mem = CreateCompatibleDC(null_mut());
